@@ -1,0 +1,46 @@
+# JBoss EAP 6.4 running jee6-ejb-examples. Usually driven through Gradle, which
+# calls docker/eap.sh:
+#   ./gradlew eapUp        build the EAR and the EAP image, start EAP, deploy, wait
+#   ./gradlew eapDeploy    rebuild and redeploy the EAR into the running server
+#   ./gradlew eapClients   run both remote EJB clients against it
+#   ./gradlew eapDown      stop and remove the container
+name: jee6-ejb-examples
+
+services:
+  eap:
+    build:
+      context: .
+      args:
+        EAP_ZIP: ${EAP_ZIP:-jboss-eap-6.4.0.zip}
+    image: jee6-ejb-examples-eap:6.4
+    ports:
+      - "8080:8080"   # http://localhost:8080/jee6-ejb-examples/
+      - "9990:9990"   # management console (admin / Admin#2026)
+      - "4447:4447"   # remote EJB
+
+  # Runs a remote client inside the EAP image, which has the Java 8 and
+  # jboss-client.jar the clients need. Started on demand:
+  #   docker compose -f docker/compose.yaml run --rm client <main class>
+  client:
+    image: jee6-ejb-examples-eap:6.4
+    profiles: ["client"]
+    depends_on:
+      eap:
+        condition: service_healthy
+    volumes:
+      - ../client/build/libs:/client:ro
+      - ./client:/client-config:ro
+    environment:
+      CART_JNDI: "ejb:jee6-ejb-examples/jee6-ejb-examples-ejb//ShoppingCartEJB!com.example.ejb.cart.ShoppingCartHome?stateful"
+      CONVERTER_JNDI: "ejb:jee6-ejb-examples/jee6-ejb-examples-ejb//CurrencyConverterEJB!com.example.ejb.converter.CurrencyConverterHome"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        exec java
+        -cp /client/jee6-ejb-examples-client.jar:/opt/jboss-eap-6.4/bin/client/jboss-client.jar:/client-config
+        -Djava.naming.factory.url.pkgs=org.jboss.ejb.client.naming
+        -Dcart.jndi="$$CART_JNDI" -Dconverter.jndi="$$CONVERTER_JNDI"
+        "$$@"
+      - client
+    command: ["com.example.client.ShoppingCartRemoteClient"]

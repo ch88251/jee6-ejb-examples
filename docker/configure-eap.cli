@@ -1,0 +1,10 @@
+# Server configuration for jee6-ejb-examples on JBoss EAP 6.4 (standalone-full.xml).
+# Runs during the image build (see Dockerfile). Already present in
+# standalone-full.xml, so nothing to add for these:
+#   - cmp subsystem (EJB 2.x CMP entity beans)
+#   - java:jboss/datasources/ExampleDS (H2, used by ProductEJB via jbosscmp-jdbc.xml)
+#   - java:/JmsXA (pooled JMS connection factory, used by PriceChangeServlet)
+#   - remote EJB connector on port 4447
+
+# Queue for PriceChangeServlet -> PriceChangeMDB (see jboss-ejb3.xml and jboss-web.xml)
+jms-queue add --queue-address=PriceChangeQueue --entries=java:/jms/queue/PriceChangeQueue

@@ -1,0 +1,108 @@
+// Java EE 6 multi-module build: EJB jar + WAR, packaged in an EAR.
+//   ./gradlew buildWar   -> web/build/libs/jee6-ejb-examples-web.war
+//   ./gradlew buildEar   -> ear/build/libs/jee6-ejb-examples.ear   (deploy this)
+//   ./gradlew coverage   -> build/reports/jacoco/testCodeCoverageReport/html/index.html
+
+plugins {
+    id 'base'
+    // Combines the modules' JaCoCo data into one report (see 'coverage' below).
+    id 'jacoco-report-aggregation'
+}
+
+allprojects {
+    group = 'com.example'
+    version = '1.0.0-SNAPSHOT'
+
+    repositories {
+        mavenCentral()
+    }
+}
+
+ext {
+    // Java EE 6 API (EJB 3.1 / Servlet 3.0 / JTA 1.1), supplied by the server at
+    // runtime. Signatures only (no method bodies): fine for compiling, but it
+    // can't be used on a test/runtime classpath.
+    javaeeApi = 'javax:javaee-api:6.0'
+
+    // Minimum line coverage per module, enforced by ./gradlew check / build
+    // (see gradle/unit-tests.gradle).
+    defaultMinLineCoverage = 0.85   // override: -PminLineCoverage=0.9
+}
+
+subprojects {
+    plugins.withType(JavaPlugin).configureEach {
+        // Java EE 6 servers ran on Java 6/7. Modern JDKs can no longer emit Java 6
+        // bytecode, so target the lowest level they support (Java 8). Use a Java 8
+        // capable server (e.g. GlassFish 3.1.2.2, JBoss EAP 6.x, WebLogic 12c).
+        tasks.withType(JavaCompile).configureEach {
+            options.release = 8
+            options.encoding = 'UTF-8'
+            options.compilerArgs << '-Xlint:-options'
+        }
+    }
+}
+
+tasks.register('buildWar') {
+    group = 'build'
+    description = 'Compiles the sources and assembles the WAR file (web module).'
+    dependsOn ':web:war'
+    def warFile = project(':web').tasks.named('war').flatMap { it.archiveFile }
+    doLast {
+        println "WAR file built: ${warFile.get().asFile}"
+    }
+}
+
+tasks.register('buildEar') {
+    group = 'build'
+    description = 'Assembles the deployable EAR (EJB module + WAR).'
+    dependsOn ':ear:ear'
+    def earFile = project(':ear').tasks.named('ear').flatMap { it.archiveFile }
+    doLast {
+        println "EAR file built: ${earFile.get().asFile}"
+    }
+}
+
+// ---- Combined code coverage for all modules with unit tests ----
+dependencies {
+    jacocoAggregation project(':ejb')
+    jacocoAggregation project(':web')
+    jacocoAggregation project(':client')
+}
+
+reporting {
+    reports {
+        testCodeCoverageReport(JacocoCoverageReport) {
+            testSuiteName = 'test'
+        }
+    }
+}
+
+tasks.register('coverage') {
+    group = 'verification'
+    description = 'Runs all unit tests and writes the combined JaCoCo coverage report.'
+    dependsOn tasks.named('testCodeCoverageReport')
+    def report = tasks.named('testCodeCoverageReport', JacocoReport).flatMap { it.reports.html.outputLocation }
+    doLast {
+        println "Coverage report: ${report.get().file('index.html').asFile}"
+    }
+}
+
+// ---- JBoss EAP 6.4 in Docker (see docker/ and the README) ----
+// -PeapZip=<file>  name of the EAP zip in docker/ (default jboss-eap-6.4.0.zip)
+def eapTask = { String name, String command, String text, List deps ->
+    tasks.register(name, Exec) {
+        group = 'jboss eap'
+        description = text
+        dependsOn deps
+        workingDir rootDir
+        commandLine 'sh', 'docker/eap.sh', command
+        if (project.hasProperty('eapZip')) {
+            environment 'EAP_ZIP', project.property('eapZip')
+        }
+    }
+}
+eapTask('eapUp', 'up', 'Builds the EAR and the EAP 6.4 image, starts EAP in Docker and deploys the app.', ['buildEar'])
+eapTask('eapDeploy', 'deploy', 'Rebuilds the EAR and redeploys it to the running EAP container.', ['buildEar'])
+eapTask('eapClients', 'clients', 'Runs both remote EJB clients against the EAP container.', [':client:clientJar'])
+eapTask('eapLogs', 'logs', 'Follows the EAP server log.', [])
+eapTask('eapDown', 'down', 'Stops and removes the EAP container.', [])

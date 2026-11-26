@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  EJB deployment descriptor for the EJB module (an ejb-jar inside the EAR).
+  EJB 2.x home/component views and entity beans need a Full Profile server,
+  not just the Web Profile / EJB Lite. Entity beans can't be packaged in a
+  WAR, which is why the beans live in their own module.
+-->
+<ejb-jar xmlns="http://java.sun.com/xml/ns/javaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://java.sun.com/xml/ns/javaee
+                             http://java.sun.com/xml/ns/javaee/ejb-jar_3_1.xsd"
+         version="3.1">
+
+    <!-- Part of the portable JNDI names: java:global/<ear>/<module-name>/<ejb-name> -->
+    <module-name>jee6-ejb-examples-ejb</module-name>
+
+    <display-name>EJB 2.x examples</display-name>
+
+    <enterprise-beans>
+        <session>
+            <ejb-name>ShoppingCartEJB</ejb-name>
+
+            <!-- Remote client view (EJB 2.x) -->
+            <home>com.example.ejb.cart.ShoppingCartHome</home>
+            <remote>com.example.ejb.cart.ShoppingCart</remote>
+
+            <!-- Local client view (EJB 2.x), used by the servlet in this WAR -->
+            <local-home>com.example.ejb.cart.ShoppingCartLocalHome</local-home>
+            <local>com.example.ejb.cart.ShoppingCartLocal</local>
+
+            <ejb-class>com.example.ejb.cart.ShoppingCartBean</ejb-class>
+            <session-type>Stateful</session-type>
+            <transaction-type>Container</transaction-type>
+        </session>
+
+        <session>
+            <ejb-name>CurrencyConverterEJB</ejb-name>
+
+            <home>com.example.ejb.converter.CurrencyConverterHome</home>
+            <remote>com.example.ejb.converter.CurrencyConverter</remote>
+            <local-home>com.example.ejb.converter.CurrencyConverterLocalHome</local-home>
+            <local>com.example.ejb.converter.CurrencyConverterLocal</local>
+
+            <ejb-class>com.example.ejb.converter.CurrencyConverterBean</ejb-class>
+            <session-type>Stateless</session-type>
+            <transaction-type>Container</transaction-type>
+
+            <!-- Read by the bean as java:comp/env/commissionPercent. A deployer can
+                 change it without recompiling. -->
+            <env-entry>
+                <env-entry-name>commissionPercent</env-entry-name>
+                <env-entry-type>java.lang.Double</env-entry-type>
+                <env-entry-value>1.5</env-entry-value>
+            </env-entry>
+        </session>
+
+        <!-- EJB 2.x CMP entity bean. Local view only: entity beans are normally
+             reached through a session bean, not called remotely. -->
+        <entity>
+            <ejb-name>ProductEJB</ejb-name>
+            <local-home>com.example.ejb.product.ProductLocalHome</local-home>
+            <local>com.example.ejb.product.ProductLocal</local>
+            <ejb-class>com.example.ejb.product.ProductBean</ejb-class>
+            <persistence-type>Container</persistence-type>
+            <prim-key-class>java.lang.String</prim-key-class>
+            <reentrant>false</reentrant>
+            <cmp-version>2.x</cmp-version>
+            <abstract-schema-name>Product</abstract-schema-name>
+            <cmp-field><field-name>sku</field-name></cmp-field>
+            <cmp-field><field-name>name</field-name></cmp-field>
+            <cmp-field><field-name>price</field-name></cmp-field>
+            <primkey-field>sku</primkey-field>
+
+            <query>
+                <query-method>
+                    <method-name>findAll</method-name>
+                    <method-params/>
+                </query-method>
+                <ejb-ql>SELECT OBJECT(p) FROM Product AS p ORDER BY p.sku</ejb-ql>
+            </query>
+            <query>
+                <query-method>
+                    <method-name>findByMaxPrice</method-name>
+                    <method-params>
+                        <method-param>java.math.BigDecimal</method-param>
+                    </method-params>
+                </query-method>
+                <ejb-ql>SELECT OBJECT(p) FROM Product AS p WHERE p.price &lt;= ?1 ORDER BY p.price</ejb-ql>
+            </query>
+            <query>
+                <query-method>
+                    <method-name>ejbSelectAllPrices</method-name>
+                    <method-params/>
+                </query-method>
+                <ejb-ql>SELECT p.price FROM Product AS p</ejb-ql>
+            </query>
+        </entity>
+
+        <!-- EJB 2.x message-driven bean. It has no home or component interface;
+             the container calls onMessage() for each message on the queue. -->
+        <message-driven>
+            <ejb-name>PriceChangeMDB</ejb-name>
+            <!-- JNDI name of the queue to listen on. Used by GlassFish and WebLogic;
+                 JBoss uses the "destination" activation property instead. -->
+            <mapped-name>jms/PriceChangeQueue</mapped-name>
+            <ejb-class>com.example.ejb.pricing.PriceChangeBean</ejb-class>
+            <messaging-type>javax.jms.MessageListener</messaging-type>
+            <transaction-type>Container</transaction-type>
+            <message-destination-type>javax.jms.Queue</message-destination-type>
+            <activation-config>
+                <activation-config-property>
+                    <activation-config-property-name>destinationType</activation-config-property-name>
+                    <activation-config-property-value>javax.jms.Queue</activation-config-property-value>
+                </activation-config-property>
+            </activation-config>
+
+            <!-- The MDB updates the Product entity: java:comp/env/ejb/Product -->
+            <ejb-local-ref>
+                <ejb-ref-name>ejb/Product</ejb-ref-name>
+                <ejb-ref-type>Entity</ejb-ref-type>
+                <local-home>com.example.ejb.product.ProductLocalHome</local-home>
+                <local>com.example.ejb.product.ProductLocal</local>
+                <ejb-link>ProductEJB</ejb-link>
+            </ejb-local-ref>
+        </message-driven>
+    </enterprise-beans>
+
+    <assembly-descriptor>
+        <container-transaction>
+            <method>
+                <ejb-name>ShoppingCartEJB</ejb-name>
+                <method-name>*</method-name>
+            </method>
+            <trans-attribute>Required</trans-attribute>
+        </container-transaction>
+        <container-transaction>
+            <!-- The converter does no transactional work: join a transaction if
+                 one exists, otherwise run without one. -->
+            <method>
+                <ejb-name>CurrencyConverterEJB</ejb-name>
+                <method-name>*</method-name>
+            </method>
+            <trans-attribute>Supports</trans-attribute>
+        </container-transaction>
+        <container-transaction>
+            <!-- Entity access must be transactional. The products servlet starts a
+                 UserTransaction, so all its calls in one request share it. -->
+            <method>
+                <ejb-name>ProductEJB</ejb-name>
+                <method-name>*</method-name>
+            </method>
+            <trans-attribute>Required</trans-attribute>
+        </container-transaction>
+        <container-transaction>
+            <!-- Required on onMessage: receiving the message and updating the
+                 entity happen in one transaction. NotSupported would be the only
+                 other option allowed for an MDB. -->
+            <method>
+                <ejb-name>PriceChangeMDB</ejb-name>
+                <method-name>onMessage</method-name>
+            </method>
+            <trans-attribute>Required</trans-attribute>
+        </container-transaction>
+    </assembly-descriptor>
+</ejb-jar>

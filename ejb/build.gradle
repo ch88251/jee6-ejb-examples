@@ -1,0 +1,16 @@
+plugins {
+    id 'java'
+    // src/testFixtures: test helpers (InMemoryJndi) shared with the web module's tests
+    id 'java-test-fixtures'
+}
+
+apply from: rootProject.file('gradle/unit-tests.gradle')
+
+dependencies {
+    compileOnly rootProject.javaeeApi
+}
+
+jar {
+    // Stable file name: the EAR's application.xml and the WAR manifest refer to it.
+    archiveFileName = 'jee6-ejb-examples-ejb.jar'
+}

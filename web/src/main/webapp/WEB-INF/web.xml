@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns="http://java.sun.com/xml/ns/javaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://java.sun.com/xml/ns/javaee
+                             http://java.sun.com/xml/ns/javaee/web-app_3_0.xsd"
+         version="3.0">
+
+    <display-name>Java EE 6 EJB 2.x Examples</display-name>
+
+    <servlet>
+        <servlet-name>ShoppingCartServlet</servlet-name>
+        <servlet-class>com.example.web.ShoppingCartServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>ShoppingCartServlet</servlet-name>
+        <url-pattern>/cart</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>CurrencyConverterServlet</servlet-name>
+        <servlet-class>com.example.web.CurrencyConverterServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>CurrencyConverterServlet</servlet-name>
+        <url-pattern>/converter</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>ProductServlet</servlet-name>
+        <servlet-class>com.example.web.ProductServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>ProductServlet</servlet-name>
+        <url-pattern>/products</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>PriceChangeServlet</servlet-name>
+        <servlet-class>com.example.web.PriceChangeServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>PriceChangeServlet</servlet-name>
+        <url-pattern>/pricing</url-pattern>
+    </servlet-mapping>
+
+    <welcome-file-list>
+        <welcome-file>index.html</welcome-file>
+    </welcome-file-list>
+
+    <!-- EJB 2.x style references to beans in the EJB module of the same EAR.
+         ejb-link names are unique in the application, so no "jar#" prefix is needed.
+         Looked up as java:comp/env/ejb/ShoppingCart -->
+    <ejb-local-ref>
+        <ejb-ref-name>ejb/ShoppingCart</ejb-ref-name>
+        <ejb-ref-type>Session</ejb-ref-type>
+        <local-home>com.example.ejb.cart.ShoppingCartLocalHome</local-home>
+        <local>com.example.ejb.cart.ShoppingCartLocal</local>
+        <ejb-link>ShoppingCartEJB</ejb-link>
+    </ejb-local-ref>
+
+    <!-- Looked up as java:comp/env/ejb/CurrencyConverter -->
+    <ejb-local-ref>
+        <ejb-ref-name>ejb/CurrencyConverter</ejb-ref-name>
+        <ejb-ref-type>Session</ejb-ref-type>
+        <local-home>com.example.ejb.converter.CurrencyConverterLocalHome</local-home>
+        <local>com.example.ejb.converter.CurrencyConverterLocal</local>
+        <ejb-link>CurrencyConverterEJB</ejb-link>
+    </ejb-local-ref>
+
+    <!-- Looked up as java:comp/env/ejb/Product. The ejb-ref-type is Entity. -->
+    <ejb-local-ref>
+        <ejb-ref-name>ejb/Product</ejb-ref-name>
+        <ejb-ref-type>Entity</ejb-ref-type>
+        <local-home>com.example.ejb.product.ProductLocalHome</local-home>
+        <local>com.example.ejb.product.ProductLocal</local>
+        <ejb-link>ProductEJB</ejb-link>
+    </ejb-local-ref>
+
+    <!-- JMS resources used by PriceChangeServlet. Each mapped-name is the global
+         JNDI name of the server resource (create them before deploying; see
+         README). Looked up as java:comp/env/jms/... -->
+    <resource-ref>
+        <res-ref-name>jms/ConnectionFactory</res-ref-name>
+        <res-type>javax.jms.ConnectionFactory</res-type>
+        <res-auth>Container</res-auth>
+        <res-sharing-scope>Shareable</res-sharing-scope>
+        <mapped-name>jms/ConnectionFactory</mapped-name>
+    </resource-ref>
+    <message-destination-ref>
+        <message-destination-ref-name>jms/PriceChangeQueue</message-destination-ref-name>
+        <message-destination-type>javax.jms.Queue</message-destination-type>
+        <message-destination-usage>Produces</message-destination-usage>
+        <mapped-name>jms/PriceChangeQueue</mapped-name>
+    </message-destination-ref>
+</web-app>

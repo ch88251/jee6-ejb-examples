@@ -1,0 +1,7 @@
+.gradle/
+build/
+*.iml
+.idea/
+
+# JBoss EAP distribution (not redistributable; see docker/Dockerfile)
+docker/*.zip
