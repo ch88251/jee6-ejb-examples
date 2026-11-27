@@ -1,100 +1,45 @@
-// Standalone (Java SE) remote clients for the session beans.
+// Standalone (Java SE) clients that call the web application's services
+// through Redisson RemoteService. They need only Redis, not the servlet container.
 plugins {
-    id 'java'
+    id 'application'
 }
 
 apply from: rootProject.file('gradle/unit-tests.gradle')
 
-configurations {
-    // The EJB module's jar, used to copy just the remote interfaces into clientJar.
-    remoteInterfaces {
-        canBeConsumed = false
-        canBeResolved = true
-    }
-}
-
 dependencies {
-    implementation project(':ejb')     // remote home/component interfaces
-    compileOnly rootProject.javaeeApi
-    remoteInterfaces project(':ejb')
+    implementation project(':core')     // the service interfaces + Redisson
+    runtimeOnly "org.slf4j:slf4j-simple:${rootProject.slf4jVersion}"
 
-    // At runtime the clients need the server vendor's client library (which also
-    // provides the javax.ejb classes). Pass its path with -PserverClientJar=...
-    if (project.hasProperty('serverClientJar')) {
-        runtimeOnly files(project.property('serverClientJar').toString().split(File.pathSeparator))
-    }
-
-    testImplementation testFixtures(project(':ejb'))   // InMemoryJndi
-    // javax.rmi.PortableRemoteObject (RMI-IIOP) left the JDK after Java 8. This jar
-    // supplies the API classes only; the tests plug in an in-JVM narrow() delegate
-    // (LocalPortableRemoteObject).
-    testImplementation('org.glassfish.corba:glassfish-corba-omgapi:4.2.5') { transitive = false }
+    testImplementation testFixtures(project(':core'))   // RedisTestServer
 }
 
-
-// Jar holding the clients plus the remote interfaces they need (no bean code).
-// Default Main-Class is the cart client; run the converter client with
-//   java -cp <jar>:<server client jar> com.example.client.CurrencyConverterRemoteClient
-tasks.register('clientJar', Jar) {
-    group = 'build'
-    description = 'Assembles the standalone remote client jar.'
-    archiveFileName = 'jee6-ejb-examples-client.jar'
-    from sourceSets.main.output
-    from({ configurations.remoteInterfaces.collect { zipTree(it) } }) {
-        include 'com/example/ejb/cart/ShoppingCart.class'
-        include 'com/example/ejb/cart/ShoppingCartHome.class'
-        include 'com/example/ejb/cart/ItemNotFoundException.class'
-        include 'com/example/ejb/converter/CurrencyConverter.class'
-        include 'com/example/ejb/converter/CurrencyConverterHome.class'
-        include 'com/example/ejb/converter/UnsupportedCurrencyException.class'
-    }
-    manifest {
-        attributes 'Main-Class': 'com.example.client.ShoppingCartRemoteClient'
-    }
+application {
+    // ./gradlew :client:installDist -> client/build/install/client/bin/client
+    mainClass = 'com.example.client.ShoppingCartRemoteClient'
 }
 
-// Settings shared by the remote client run tasks:
-//   -PserverClientJar=<path>  required: the server's client library
-//   -PclientJavaHome=<JDK 8>  optional: RMI-IIOP/CORBA, used by EJB 2.x remote
-//                             calls, was removed from the JDK after Java 8, and
-//                             Java EE 6 era client libraries don't run on newer JVMs
+// Settings shared by the run tasks:
+//   -PredisAddress=redis://host:6379   Redis the web application uses (default redis://localhost:6379)
 def configureRemoteClient = { JavaExec task, String clientMainClass ->
     task.group = 'application'
     task.classpath = sourceSets.main.runtimeClasspath
     task.mainClass = clientMainClass
-    if (project.hasProperty('clientJavaHome')) {
-        task.executable = "${project.property('clientJavaHome')}/bin/java"
-    }
-    def hasClientJar = project.hasProperty('serverClientJar')
-    task.doFirst {
-        if (!hasClientJar) {
-            throw new GradleException('Pass the application server client library: '
-                    + '-PserverClientJar=/path/to/gf-client.jar (or jboss-client.jar)')
-        }
+    if (project.hasProperty('redisAddress')) {
+        task.systemProperty 'redis.address', project.property('redisAddress')
     }
 }
 
-// Stateful cart client, e.g.
-//   ./gradlew runClient -PserverClientJar=/opt/glassfish3/glassfish/lib/gf-client.jar
-// Optional: -PcartJndi=<home JNDI name>  -PcustomerName=<name>
+// Cart client, e.g. ./gradlew runClient -PcustomerName=Bob
 tasks.register('runClient', JavaExec) {
-    description = 'Runs the stateful cart remote client (needs -PserverClientJar=<path>).'
+    description = 'Runs the shopping cart remote client.'
     configureRemoteClient(it, 'com.example.client.ShoppingCartRemoteClient')
-    if (project.hasProperty('cartJndi')) {
-        systemProperty 'cart.jndi', project.property('cartJndi')
-    }
     args project.findProperty('customerName') ?: 'Alice'
 }
 
-// Stateless converter client, e.g.
-//   ./gradlew runConverterClient -PserverClientJar=... -Pconvert="250 GBP JPY"
-// Optional: -PconverterJndi=<home JNDI name>  -Pconvert="<amount> <from> <to>"
+// Converter client, e.g. ./gradlew runConverterClient -Pconvert="250 GBP JPY"
 tasks.register('runConverterClient', JavaExec) {
-    description = 'Runs the stateless converter remote client (needs -PserverClientJar=<path>).'
+    description = 'Runs the currency converter remote client.'
     configureRemoteClient(it, 'com.example.client.CurrencyConverterRemoteClient')
-    if (project.hasProperty('converterJndi')) {
-        systemProperty 'converter.jndi', project.property('converterJndi')
-    }
     if (project.hasProperty('convert')) {
         args project.property('convert').toString().trim().split(/\s+/)
     }

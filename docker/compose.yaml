@@ -1,46 +1,35 @@
-# JBoss EAP 6.4 running jee6-ejb-examples. Usually driven through Gradle, which
-# calls docker/eap.sh:
-#   ./gradlew eapUp        build the EAR and the EAP image, start EAP, deploy, wait
-#   ./gradlew eapDeploy    rebuild and redeploy the EAR into the running server
-#   ./gradlew eapClients   run both remote EJB clients against it
-#   ./gradlew eapDown      stop and remove the container
+# Redis + Tomcat running jee6-ejb-examples. Usually driven through Gradle, which
+# calls docker/app.sh:
+#   ./gradlew appUp        build the WAR, start Redis and Tomcat, deploy, wait
+#   ./gradlew appDeploy    rebuild and redeploy the WAR into the running Tomcat
+#   ./gradlew appClients   run both remote clients against them
+#   ./gradlew appDown      stop and remove the containers and the Redis data
 name: jee6-ejb-examples
 
 services:
-  eap:
-    build:
-      context: .
-      args:
-        EAP_ZIP: ${EAP_ZIP:-jboss-eap-6.4.0.zip}
-    image: jee6-ejb-examples-eap:6.4
+  redis:
+    image: redis:7.4-alpine
+    # Append-only file, so products and carts survive a container restart.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"   # for the remote clients and redis-cli on the host
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  tomcat:
+    image: tomcat:9.0-jdk21-temurin   # Servlet 4.0 (javax.servlet)
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_ADDRESS: redis://redis:6379
     ports:
       - "8080:8080"   # http://localhost:8080/jee6-ejb-examples/
-      - "9990:9990"   # management console (admin / Admin#2026)
-      - "4447:4447"   # remote EJB
 
-  # Runs a remote client inside the EAP image, which has the Java 8 and
-  # jboss-client.jar the clients need. Started on demand:
-  #   docker compose -f docker/compose.yaml run --rm client <main class>
-  client:
-    image: jee6-ejb-examples-eap:6.4
-    profiles: ["client"]
-    depends_on:
-      eap:
-        condition: service_healthy
-    volumes:
-      - ../client/build/libs:/client:ro
-      - ./client:/client-config:ro
-    environment:
-      CART_JNDI: "ejb:jee6-ejb-examples/jee6-ejb-examples-ejb//ShoppingCartEJB!com.example.ejb.cart.ShoppingCartHome?stateful"
-      CONVERTER_JNDI: "ejb:jee6-ejb-examples/jee6-ejb-examples-ejb//CurrencyConverterEJB!com.example.ejb.converter.CurrencyConverterHome"
-    entrypoint:
-      - /bin/sh
-      - -c
-      - >-
-        exec java
-        -cp /client/jee6-ejb-examples-client.jar:/opt/jboss-eap-6.4/bin/client/jboss-client.jar:/client-config
-        -Djava.naming.factory.url.pkgs=org.jboss.ejb.client.naming
-        -Dcart.jndi="$$CART_JNDI" -Dconverter.jndi="$$CONVERTER_JNDI"
-        "$$@"
-      - client
-    command: ["com.example.client.ShoppingCartRemoteClient"]
+volumes:
+  redis-data:

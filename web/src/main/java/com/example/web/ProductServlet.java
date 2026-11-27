@@ -1,121 +1,94 @@
 package com.example.web;
 
-import com.example.ejb.product.ProductLocal;
-import com.example.ejb.product.ProductLocalHome;
+import static com.example.web.Html.escape;
+
+import com.example.core.product.DuplicateProductException;
+import com.example.core.product.Product;
+import com.example.core.product.ProductCatalog;
+import com.example.core.product.ProductNotFoundException;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.math.BigDecimal;
-import java.util.Collection;
-import javax.ejb.CreateException;
-import javax.ejb.DuplicateKeyException;
-import javax.ejb.FinderException;
-import javax.ejb.ObjectNotFoundException;
-import javax.ejb.RemoveException;
-import javax.naming.InitialContext;
-import javax.naming.NamingException;
+import java.util.List;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-import javax.transaction.Status;
-import javax.transaction.UserTransaction;
 
 /**
- * Web client for the EJB 2.x CMP Product entity.
+ * Web client for the product catalog, stored in Redis.
  * <p>
- * Each request runs in one {@link UserTransaction}. Every entity call then
- * joins it (the trans-attribute is Required), so the finder results and the
- * getters run against one consistent view of the data. All changes are
- * written when the transaction commits. Without it, each entity call would be
- * its own short transaction.
+ * Each catalog call is atomic on its own. The old version wrapped each request
+ * in a JTA {@code UserTransaction} around the CMP entity calls; there is no
+ * transaction manager any more. The page is still built in memory first, so a
+ * Redis failure halfway through gives an error, not half a page.
  */
 public class ProductServlet extends HttpServlet {
 
     private static final long serialVersionUID = 1L;
-    private static final String HOME_JNDI = "java:comp/env/ejb/Product";
 
-    private transient ProductLocalHome home;
+    private transient ProductCatalog catalog;
 
     @Override
     public void init() throws ServletException {
         try {
-            home = (ProductLocalHome) new InitialContext().lookup(HOME_JNDI);
-        } catch (NamingException e) {
-            throw new ServletException("Cannot look up " + HOME_JNDI, e);
+            catalog = AppContextListener.service(getServletContext(), ProductCatalog.class);
+        } catch (IllegalStateException e) {
+            throw new ServletException(e.getMessage(), e);
         }
     }
 
     @Override
-    protected void doGet(HttpServletRequest req, HttpServletResponse resp)
-            throws ServletException, IOException {
-        inTransaction(req, resp, null);
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        respond(req, resp, null);
     }
 
     @Override
-    protected void doPost(HttpServletRequest req, HttpServletResponse resp)
-            throws ServletException, IOException {
-        inTransaction(req, resp, req.getParameter("action"));
+    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        respond(req, resp, req.getParameter("action"));
     }
 
-    private void inTransaction(HttpServletRequest req, HttpServletResponse resp, String action)
-            throws ServletException, IOException {
+    private void respond(HttpServletRequest req, HttpServletResponse resp, String action) throws IOException {
         StringWriter page = new StringWriter();
-        UserTransaction utx = userTransaction();
-        try {
-            utx.begin();
-            String message = action == null ? null : perform(action, req);
-            render(req, new PrintWriter(page), message);
-            if (utx.getStatus() == Status.STATUS_MARKED_ROLLBACK) {
-                utx.rollback();
-            } else {
-                utx.commit(); // the container writes changed cmp-fields now
-            }
-        } catch (Exception e) {
-            rollbackQuietly(utx);
-            throw new ServletException("Product request failed", e);
-        }
-        // Send the page only after a successful commit.
+        String message = action == null ? null : perform(action, req);
+        render(req, new PrintWriter(page), message);
         resp.setContentType("text/html;charset=UTF-8");
         resp.getWriter().write(page.toString());
     }
 
     /** Runs one action and returns a message for the user. */
-    private String perform(String action, HttpServletRequest req) throws FinderException, RemoveException {
+    private String perform(String action, HttpServletRequest req) {
         String sku = req.getParameter("sku");
         try {
             if ("create".equals(action)) {
-                ProductLocal p = home.create(sku, req.getParameter("name"), decimal(req.getParameter("price")));
+                Product p = catalog.create(sku, req.getParameter("name"), decimal(req.getParameter("price")));
                 return "Created " + p.getSku();
             } else if ("discount".equals(action)) {
                 int percent = Integer.parseInt(String.valueOf(req.getParameter("percent")).trim());
                 if (percent <= 0 || percent >= 100) {
-                    // Checked here: the bean would throw an EJBException, which
-                    // rolls back the whole transaction.
                     return "Discount must be between 1 and 99 percent.";
                 }
-                ProductLocal p = home.findByPrimaryKey(sku);
-                p.applyDiscount(percent);
-                return "New price for " + sku + ": " + p.getPrice();
+                Product p = catalog.applyDiscount(sku, percent);
+                return "New price for " + p.getSku() + ": " + p.getPrice();
             } else if ("delete".equals(action)) {
-                home.findByPrimaryKey(sku).remove(); // container DELETEs the row
-                return "Deleted " + sku;
+                return catalog.delete(sku) ? "Deleted " + sku : "No product with SKU " + sku;
             } else if ("sample".equals(action)) {
                 return loadSampleData();
             }
             return null;
-        } catch (DuplicateKeyException e) {
-            return "A product with SKU " + sku + " already exists.";
-        } catch (CreateException e) {
-            return "Could not create product: " + e.getMessage();
-        } catch (ObjectNotFoundException e) {
-            return "No product with SKU " + sku;
+        } catch (DuplicateProductException e) {
+            return e.getMessage();
+        } catch (ProductNotFoundException e) {
+            return e.getMessage();
         } catch (NumberFormatException e) {
             return "Please enter a valid number.";
+        } catch (IllegalArgumentException e) {
+            return "Could not create product: " + e.getMessage();
         }
     }
 
-    private String loadSampleData() throws FinderException {
+    private String loadSampleData() {
         String[][] samples = {
             {"BK-001", "Java EE 6 Tutorial", "39.99"},
             {"MG-002", "Coffee mug", "9.50"},
@@ -125,45 +98,41 @@ public class ProductServlet extends HttpServlet {
         int created = 0;
         for (String[] s : samples) {
             try {
-                home.findByPrimaryKey(s[0]);
-            } catch (ObjectNotFoundException notThereYet) {
-                try {
-                    home.create(s[0], s[1], new BigDecimal(s[2]));
-                    created++;
-                } catch (CreateException e) {
-                    return "Could not create " + s[0] + ": " + e.getMessage();
-                }
+                catalog.create(s[0], s[1], new BigDecimal(s[2]));
+                created++;
+            } catch (DuplicateProductException alreadyThere) {
+                // keep the existing product
             }
         }
         return "Created " + created + " sample product(s).";
     }
 
-    private void render(HttpServletRequest req, PrintWriter out, String message) throws FinderException {
+    private void render(HttpServletRequest req, PrintWriter out, String message) {
         String self = req.getContextPath() + "/products";
         String max = req.getParameter("maxPrice");
         boolean filtered = max != null && !max.trim().isEmpty();
-        Collection<ProductLocal> products;
+        List<Product> products;
         try {
-            products = filtered ? home.findByMaxPrice(decimal(max)) : home.findAll();
+            products = filtered ? catalog.findByMaxPrice(decimal(max)) : catalog.findAll();
         } catch (NumberFormatException e) {
-            products = home.findAll();
+            products = catalog.findAll();
             filtered = false;
             message = "Not a valid maximum price: " + max;
         }
 
-        out.println("<!DOCTYPE html><html><head><title>EJB 2.x CMP Entity</title></head><body>");
-        out.println("<h1>EJB 2.x CMP Entity Bean Demo</h1>");
+        out.println("<!DOCTYPE html><html><head><title>Product Catalog</title></head><body>");
+        out.println("<h1>Product Catalog (stored in Redis)</h1>");
         if (message != null) {
             out.println("<p><strong>" + escape(message) + "</strong></p>");
         }
-        out.println("<p>Average price (home method): " + home.getAveragePrice() + "</p>");
+        out.println("<p>Average price: " + catalog.getAveragePrice() + "</p>");
 
         out.println("<form method='get' action='" + self + "'>Max price: <input name='maxPrice' value='"
-                + (filtered ? escape(max) : "") + "'/> <button>Filter (findByMaxPrice)</button> "
-                + "<a href='" + self + "'>Show all (findAll)</a></form>");
+                + (filtered ? escape(max) : "") + "'/> <button>Filter</button> "
+                + "<a href='" + self + "'>Show all</a></form>");
 
         out.println("<table border='1' cellpadding='4'><tr><th>SKU</th><th>Name</th><th>Price</th><th></th></tr>");
-        for (ProductLocal p : products) {
+        for (Product p : products) {
             String sku = escape(p.getSku());
             out.println("<tr><td>" + sku + "</td><td>" + escape(p.getName()) + "</td><td>" + p.getPrice() + "</td><td>"
                     + "<form style='display:inline' method='post' action='" + self + "'>"
@@ -189,31 +158,5 @@ public class ProductServlet extends HttpServlet {
             throw new NumberFormatException("missing value");
         }
         return new BigDecimal(value.trim());
-    }
-
-    private static UserTransaction userTransaction() throws ServletException {
-        try {
-            return (UserTransaction) new InitialContext().lookup("java:comp/UserTransaction");
-        } catch (NamingException e) {
-            throw new ServletException(e);
-        }
-    }
-
-    private static void rollbackQuietly(UserTransaction utx) {
-        try {
-            if (utx.getStatus() != Status.STATUS_NO_TRANSACTION) {
-                utx.rollback();
-            }
-        } catch (Exception ignored) {
-            // the original exception is the one worth reporting
-        }
-    }
-
-    private static String escape(String s) {
-        if (s == null) {
-            return "";
-        }
-        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                .replace("'", "&#39;").replace("\"", "&quot;");
     }
 }

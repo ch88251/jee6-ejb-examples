@@ -1,34 +1,32 @@
 package com.example.client;
 
-import com.example.ejb.converter.CurrencyConverter;
-import com.example.ejb.converter.CurrencyConverterHome;
-import com.example.ejb.converter.UnsupportedCurrencyException;
+import com.example.core.converter.CurrencyConverter;
+import com.example.core.converter.UnsupportedCurrencyException;
 import java.math.BigDecimal;
-import javax.naming.InitialContext;
-import javax.naming.NamingException;
-import javax.rmi.PortableRemoteObject;
+import org.redisson.api.RedissonClient;
 
 /**
- * Standalone client for the EJB 2.x stateless converter, using its remote view.
- * <p>
- * JNDI and classpath setup is the same as for {@link ShoppingCartRemoteClient}.
- * Set the home's JNDI name with {@code -Dconverter.jndi=...}.
+ * Standalone client for the currency converter, calling the web application's
+ * {@link CurrencyConverter} through Redisson RemoteService. Connection settings
+ * are the same as for {@link ShoppingCartRemoteClient}.
  * <p>
  * Arguments (optional): {@code <amount> <from> <to>}, e.g. {@code 250 GBP JPY}.
  */
-public class CurrencyConverterRemoteClient {
+public final class CurrencyConverterRemoteClient {
 
-    static final String DEFAULT_JNDI_NAME =
-            "java:global/jee6-ejb-examples/jee6-ejb-examples-ejb/CurrencyConverterEJB!com.example.ejb.converter.CurrencyConverterHome";
+    private CurrencyConverterRemoteClient() {
+    }
 
     public static void main(String[] args) throws Exception {
-        String jndiName = System.getProperty("converter.jndi", DEFAULT_JNDI_NAME);
+        RedissonClient redisson = RemoteServices.connect();
+        try {
+            run(RemoteServices.proxy(redisson, CurrencyConverter.class), args);
+        } finally {
+            redisson.shutdown();
+        }
+    }
 
-        CurrencyConverterHome home = lookupHome(jndiName);
-
-        // For a stateless bean, create() takes no arguments and just returns a
-        // reference. No client-specific instance is set up.
-        CurrencyConverter converter = home.create();
+    static void run(CurrencyConverter converter, String[] args) throws Exception {
         System.out.println("Supported currencies: " + converter.getSupportedCurrencies());
         System.out.println("Commission: " + converter.getCommissionPercent() + "%");
 
@@ -40,41 +38,19 @@ public class CurrencyConverterRemoteClient {
             convert(converter, new BigDecimal("1000"), "JPY", "CAD");
         }
 
-        // An application exception reaches the client unwrapped.
+        // A checked exception thrown by the service reaches the client as itself.
         try {
             converter.convert(BigDecimal.ONE, "USD", "XYZ");
         } catch (UnsupportedCurrencyException e) {
             System.out.println("Expected application exception: " + e.getMessage());
         }
-
-        // Each call above may have gone to a different pooled instance; compare
-        // the [CurrencyConverterBean@...] lines in the server log.
-        //
-        // For a stateless bean, two references from the same home are always
-        // "identical": every instance is interchangeable.
-        CurrencyConverter another = home.create();
-        System.out.println("Two create() results identical = " + converter.isIdentical(another));
-
-        // remove() only discards the client's reference. The container keeps the
-        // instances in its pool, and ejbRemove() is NOT called.
-        converter.remove();
-        System.out.println("Reference removed.");
+        // The service is stateless: any server worker may have run each call
+        // (compare the [CurrencyConverter] lines in the server log).
     }
 
     private static void convert(CurrencyConverter converter, BigDecimal amount, String from, String to)
-            throws Exception {
+            throws UnsupportedCurrencyException {
         BigDecimal result = converter.convert(amount, from, to);
         System.out.println(amount + " " + from + " = " + result.toPlainString() + " " + to);
-    }
-
-    static CurrencyConverterHome lookupHome(String jndiName) throws NamingException {
-        InitialContext ctx = new InitialContext();
-        try {
-            System.out.println("Looking up " + jndiName);
-            Object ref = ctx.lookup(jndiName);
-            return (CurrencyConverterHome) PortableRemoteObject.narrow(ref, CurrencyConverterHome.class);
-        } finally {
-            ctx.close();
-        }
     }
 }

@@ -1,7 +1,9 @@
-// Java EE 6 multi-module build: EJB jar + WAR, packaged in an EAR.
-//   ./gradlew buildWar   -> web/build/libs/jee6-ejb-examples-web.war
-//   ./gradlew buildEar   -> ear/build/libs/jee6-ejb-examples.ear   (deploy this)
+// Multi-module build: POJO services (core), a WAR (web) and standalone clients.
+// Redis, through the Redisson client, holds the data, the configuration and the
+// price change queue, and carries the remote calls.
+//   ./gradlew buildWar   -> web/build/libs/jee6-ejb-examples.war   (deploy this)
 //   ./gradlew coverage   -> build/reports/jacoco/testCodeCoverageReport/html/index.html
+//   ./gradlew appUp      -> Redis + Tomcat in Docker, with the WAR deployed
 
 plugins {
     id 'base'
@@ -19,10 +21,10 @@ allprojects {
 }
 
 ext {
-    // Java EE 6 API (EJB 3.1 / Servlet 3.0 / JTA 1.1), supplied by the server at
-    // runtime. Signatures only (no method bodies): fine for compiling, but it
-    // can't be used on a test/runtime classpath.
-    javaeeApi = 'javax:javaee-api:6.0'
+    redissonVersion = '4.8.0'
+    jacksonVersion = '2.22.1'          // the Jackson 2 version Redisson 4.8.0 is built against
+    slf4jVersion = '2.0.17'
+    testcontainersVersion = '2.0.5'
 
     // Minimum line coverage per module, enforced by ./gradlew check / build
     // (see gradle/unit-tests.gradle).
@@ -31,20 +33,18 @@ ext {
 
 subprojects {
     plugins.withType(JavaPlugin).configureEach {
-        // Java EE 6 servers ran on Java 6/7. Modern JDKs can no longer emit Java 6
-        // bytecode, so target the lowest level they support (Java 8). Use a Java 8
-        // capable server (e.g. GlassFish 3.1.2.2, JBoss EAP 6.x, WebLogic 12c).
         tasks.withType(JavaCompile).configureEach {
-            options.release = 8
+            // Tomcat 9 and Redisson run on Java 8+, but there is no longer an
+            // old application server to target, so use a current LTS.
+            options.release = 17
             options.encoding = 'UTF-8'
-            options.compilerArgs << '-Xlint:-options'
         }
     }
 }
 
 tasks.register('buildWar') {
     group = 'build'
-    description = 'Compiles the sources and assembles the WAR file (web module).'
+    description = 'Compiles the sources and assembles the deployable WAR file.'
     dependsOn ':web:war'
     def warFile = project(':web').tasks.named('war').flatMap { it.archiveFile }
     doLast {
@@ -52,19 +52,9 @@ tasks.register('buildWar') {
     }
 }
 
-tasks.register('buildEar') {
-    group = 'build'
-    description = 'Assembles the deployable EAR (EJB module + WAR).'
-    dependsOn ':ear:ear'
-    def earFile = project(':ear').tasks.named('ear').flatMap { it.archiveFile }
-    doLast {
-        println "EAR file built: ${earFile.get().asFile}"
-    }
-}
-
 // ---- Combined code coverage for all modules with unit tests ----
 dependencies {
-    jacocoAggregation project(':ejb')
+    jacocoAggregation project(':core')
     jacocoAggregation project(':web')
     jacocoAggregation project(':client')
 }
@@ -87,22 +77,18 @@ tasks.register('coverage') {
     }
 }
 
-// ---- JBoss EAP 6.4 in Docker (see docker/ and the README) ----
-// -PeapZip=<file>  name of the EAP zip in docker/ (default jboss-eap-6.4.0.zip)
-def eapTask = { String name, String command, String text, List deps ->
+// ---- Redis + Tomcat in Docker (see docker/ and the README) ----
+def appTask = { String name, String command, String text, List deps ->
     tasks.register(name, Exec) {
-        group = 'jboss eap'
+        group = 'docker'
         description = text
         dependsOn deps
         workingDir rootDir
-        commandLine 'sh', 'docker/eap.sh', command
-        if (project.hasProperty('eapZip')) {
-            environment 'EAP_ZIP', project.property('eapZip')
-        }
+        commandLine 'sh', 'docker/app.sh', command
     }
 }
-eapTask('eapUp', 'up', 'Builds the EAR and the EAP 6.4 image, starts EAP in Docker and deploys the app.', ['buildEar'])
-eapTask('eapDeploy', 'deploy', 'Rebuilds the EAR and redeploys it to the running EAP container.', ['buildEar'])
-eapTask('eapClients', 'clients', 'Runs both remote EJB clients against the EAP container.', [':client:clientJar'])
-eapTask('eapLogs', 'logs', 'Follows the EAP server log.', [])
-eapTask('eapDown', 'down', 'Stops and removes the EAP container.', [])
+appTask('appUp', 'up', 'Builds the WAR, starts Redis and Tomcat in Docker and deploys the app.', ['buildWar'])
+appTask('appDeploy', 'deploy', 'Rebuilds the WAR and redeploys it to the running Tomcat container.', ['buildWar'])
+appTask('appClients', 'clients', 'Runs both remote clients against the running containers.', [':client:installDist'])
+appTask('appLogs', 'logs', 'Follows the Tomcat log.', [])
+appTask('appDown', 'down', 'Stops and removes the containers (and the Redis data).', [])

@@ -1,0 +1,23 @@
+plugins {
+    id 'java-library'
+    // src/testFixtures: RedisTestServer (a Redis container for tests), shared
+    // with the web and client modules' tests
+    id 'java-test-fixtures'
+}
+
+apply from: rootProject.file('gradle/unit-tests.gradle')
+
+dependencies {
+    // Exposed as 'api': the web and client modules use RedissonClient directly.
+    api "org.redisson:redisson:${rootProject.redissonVersion}"
+    // Redisson 4.x no longer ships Jackson; the JSON codecs need it.
+    implementation "com.fasterxml.jackson.core:jackson-databind:${rootProject.jacksonVersion}"
+
+    testFixturesApi "org.testcontainers:testcontainers:${rootProject.testcontainersVersion}"
+    testFixturesApi platform('org.junit:junit-bom:5.11.4')
+    testFixturesApi 'org.junit.jupiter:junit-jupiter-api'
+}
+
+jar {
+    archiveFileName = 'jee6-ejb-examples-core.jar'
+}

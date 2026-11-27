@@ -1,9 +1,9 @@
-// Shared unit test setup for the ejb and web modules:
+// Shared unit test setup for the core, web and client modules:
 //   apply from: rootProject.file('gradle/unit-tests.gradle')
 //
-// Tests can't use javax:javaee-api:6.0 (it has no method bodies), so the test
-// classpath gets the real EJB 3.1, JMS 1.1 and JTA 1.1 API classes from the
-// JBoss spec jars. They are test-only and never packaged.
+// Tests that need Redis start one in Docker through Testcontainers
+// (core/src/testFixtures: RedisTestServer). Without Docker those tests are
+// skipped, not failed.
 
 configurations {
     // Mockito attached as a Java agent (instead of self-attaching at runtime,
@@ -12,30 +12,13 @@ configurations {
 }
 
 dependencies {
-    testImplementation 'org.jboss.spec.javax.ejb:jboss-ejb-api_3.1_spec:1.0.2.Final'
-    testImplementation 'org.jboss.spec.javax.jms:jboss-jms-api_1.1_spec:1.0.1.Final'
-    testImplementation 'org.jboss.spec.javax.transaction:jboss-transaction-api_1.1_spec:1.0.1.Final'
-
     testImplementation platform('org.junit:junit-bom:5.11.4')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     testImplementation 'org.mockito:mockito-core:5.14.2'
     testImplementation 'org.mockito:mockito-junit-jupiter:5.14.2'
     mockitoAgent('org.mockito:mockito-core:5.14.2') { transitive = false }
-}
-
-// Keep the signatures-only Java EE jar off the test classpath, in case it
-// arrives through providedCompile (war plugin) or a project dependency.
-['testCompileClasspath', 'testRuntimeClasspath'].each { name ->
-    configurations.named(name) {
-        exclude group: 'javax', module: 'javaee-api'
-    }
-}
-
-// Production code targets Java 8 (the server). Tests only run on the build
-// JDK, and Mockito 5 needs Java 11+.
-tasks.named('compileTestJava') {
-    options.release = 11
+    testRuntimeOnly "org.slf4j:slf4j-simple:${rootProject.slf4jVersion}"
 }
 
 tasks.named('test') {
@@ -45,6 +28,8 @@ tasks.named('test') {
     // Avoids the JVM's "Sharing is only supported for boot loader classes" warning
     // that a -javaagent triggers.
     jvmArgs '-Xshare:off'
+    // Quiet Redisson/Testcontainers (slf4j-simple) unless something goes wrong.
+    systemProperty 'org.slf4j.simpleLogger.defaultLogLevel', 'warn'
     testLogging {
         events = ['failed', 'skipped']
         exceptionFormat = 'full'

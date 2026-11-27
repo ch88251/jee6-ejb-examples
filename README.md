@@ -1,180 +1,234 @@
 # jee6-ejb-examples
 
-A multi-module Gradle project for Java EE 6 with EJB 2.x examples, packaged as an
-EAR and used from servlets and standalone remote clients:
+A multi-module Gradle project that started as Java EE 6 / EJB 2.x examples and
+has been migrated to **plain Java objects (POJOs)** with **Redis** (through the
+[Redisson](https://redisson.org) client) in place of the EJB container and JNDI.
+It runs as a single WAR on Tomcat 9, with standalone clients that call the
+services remotely through Redis.
 
-* **Stateful session bean**: `ShoppingCartEJB`, a shopping cart that keeps per-client state
-* **Stateless session bean**: `CurrencyConverterEJB`, a pooled currency converter configured by an `env-entry`
-* **CMP 2.x entity bean**: `ProductEJB`, a product catalog with EJB-QL finders, an `ejbSelect` and a home business method
-* **Message-driven bean**: `PriceChangeMDB`, which consumes JMS price change messages and applies them to `ProductEJB`
+| Example | Was (EJB 2.x) | Now |
+|---|---|---|
+| Shopping cart | Stateful session bean `ShoppingCartEJB` | `ShoppingCartService`: carts are Redis keys with a 30-minute idle timeout |
+| Currency converter | Stateless session bean `CurrencyConverterEJB` | `CurrencyConverterService`: one shared, thread-safe instance |
+| Product catalog | CMP 2.x entity bean `ProductEJB` | `Product` value object + `ProductCatalog` stored in a Redis hash |
+| Price changes | Message-driven bean `PriceChangeMDB` on a JMS queue | `PriceChangeWorker` thread consuming a reliable Redis list queue |
 
 ## Build
 
 ```bash
-./gradlew buildEar      # ear/build/libs/jee6-ejb-examples.ear   <- deploy this
-./gradlew buildWar      # web/build/libs/jee6-ejb-examples-web.war (web module only)
-./gradlew clientJar     # client/build/libs/jee6-ejb-examples-client.jar
-./gradlew test          # unit tests for the beans, servlets and remote clients (see "Unit tests")
-./gradlew coverage      # all unit tests + combined coverage report (see "Code coverage")
+./gradlew buildWar      # web/build/libs/jee6-ejb-examples.war   <- deploy this
+./gradlew test          # unit tests (the Redis ones need Docker; see "Tests")
+./gradlew coverage      # all tests + combined coverage report
+./gradlew appUp         # Redis + Tomcat in Docker, with the WAR deployed (see "Run")
 ```
+
+Needs JDK 17 or later. The code is compiled with `--release 17`.
 
 ## Modules
 
 ```
 jee6-ejb-examples/
-├── ejb/      all beans + META-INF/ejb-jar.xml, glassfish-ejb-jar.xml  -> jee6-ejb-examples-ejb.jar
-├── web/      servlets + WEB-INF/web.xml                               -> jee6-ejb-examples-web.war
-├── client/   standalone remote clients for the session beans          -> jee6-ejb-examples-client.jar
-└── ear/      bundles the EJB jar and the WAR, generates application.xml -> jee6-ejb-examples.ear
+├── core/     services (POJOs), their Redis implementations, AppServices -> jee6-ejb-examples-core.jar
+├── web/      servlets + AppContextListener + WEB-INF/web.xml             -> jee6-ejb-examples.war
+└── client/   standalone clients using Redisson RemoteService             -> ./gradlew :client:installDist
 ```
 
-**Why an EAR?** The EJB 3.1 spec doesn't allow entity beans (CMP or BMP) in a
-WAR, so the beans live in a separate EJB module. The WAR uses the EJB module's
-interfaces (`providedCompile project(':ejb')`) without bundling them. Its manifest
-`Class-Path` points at the EJB jar in the EAR. The WAR on its own is not
-deployable; deploy the EAR.
+The `ejb` module became `core` (packages `com.example.core.*`). The `ear` module
+is gone: without entity beans there is no need for an EAR, and the core jar,
+Redisson and its dependencies are packaged in the WAR's `WEB-INF/lib`.
 
-## Stateful example
+## What replaced what
 
-| File | Role |
-|------|------|
-| `ShoppingCartHome` / `ShoppingCart` | EJB 2.x **remote** home + component interfaces (`EJBHome` / `EJBObject`) |
-| `ShoppingCartLocalHome` / `ShoppingCartLocal` | EJB 2.x **local** home + component interfaces (`EJBLocalHome` / `EJBLocalObject`) |
-| `ShoppingCartBean` | Bean class implementing `javax.ejb.SessionBean` (`ejbCreate`, `ejbRemove`, `ejbActivate`, `ejbPassivate`) |
-| `ejb-jar.xml` | Declares the bean as `Stateful`, with container-managed transactions (no annotations) |
-| `web.xml` | Servlet mapping and the `ejb-local-ref` (`java:comp/env/ejb/ShoppingCart`) |
-| `ShoppingCartServlet` | Looks up the local home through JNDI, calls `create()`, keeps the cart in the `HttpSession`, and calls `remove()` at checkout |
+| EJB / Java EE | Replacement |
+|---|---|
+| Home and component interfaces (`EJBHome`, `EJBLocalHome`, `EJBObject`, `EJBLocalObject`) | One plain business interface per service: `ShoppingCartService`, `CurrencyConverter`, `ProductCatalog`, `PriceChangeQueue` |
+| Bean classes and lifecycle callbacks (`ejbCreate`, `ejbRemove`, `ejbActivate`, `ejbPassivate`, ...) | Ordinary classes with constructors. Nothing to passivate: state is in Redis |
+| `ejb-jar.xml`, `glassfish-ejb-jar.xml`, `jboss-ejb3.xml`, `jbosscmp-jdbc.xml` | None. `AppServices` builds and wires everything in Java |
+| `ejb-local-ref` in web.xml + `new InitialContext().lookup("java:comp/env/ejb/...")` | `AppContextListener` stores each service in the `ServletContext` under its interface name. Servlets fetch it in `init()` |
+| `env-entry` `commissionPercent` (JNDI) | Field `commissionPercent` in the Redis hash `jee6-ejb-examples:config` (`AppConfig`), read on every call, so it can be changed while running |
+| CMP fields, EJB-QL finders, `ejbSelect`, home business method | `RedisProductCatalog`: Java queries over a Redis hash |
+| `UserTransaction` around each product request | None. Each catalog call is atomic on its own (`HSETNX` for create, compare-and-set for discounts) |
+| JMS queue + `MapMessage` + MDB `onMessage` | `RedisPriceChangeQueue` (JSON messages on Redis lists) + `PriceChangeWorker` + `PriceChangeHandler` |
+| MDB rollback/redelivery (`setRollbackOnly`) | The message goes back on the queue with `attempt + 1`. After 5 attempts it goes to a dead-letter list |
+| Remote views over RMI-IIOP (`PortableRemoteObject.narrow`, `Handle`, vendor client jar, Java 8) | Redisson RemoteService: `RRemoteService.get(ShoppingCartService.class)` gives a proxy. The cart id plays the part of the `Handle` |
+| `NoSuchObjectLocalException` (removed or timed-out stateful bean) | `CartNotFoundException` |
+| `CreateException`, `EJBException`, `DuplicateKeyException`, `ObjectNotFoundException` | `IllegalArgumentException`, `DuplicateProductException`, `ProductNotFoundException` |
+| JBoss EAP 6.4 Docker image (`docker/Dockerfile`, `configure-eap.cli`, `eap.sh`) | `docker/compose.yaml` (Redis 7.4 + Tomcat 9) and `docker/app.sh` |
 
-## Stateless example
+### Wiring: `AppServices` and `AppContextListener`
 
-| File | Role |
-|------|------|
-| `CurrencyConverterHome` / `CurrencyConverter` | Remote home + component interfaces |
-| `CurrencyConverterLocalHome` / `CurrencyConverterLocal` | Local home + component interfaces |
-| `CurrencyConverterBean` | `SessionBean` with a no-arg `ejbCreate()`. It reads `java:comp/env/commissionPercent` and keeps no client state |
-| `ejb-jar.xml` | `Stateless` session, `env-entry` `commissionPercent` = 1.5, transaction attribute `Supports` |
-| `CurrencyConverterServlet` | Caches the local home, calls `create()` per request, stores nothing in the `HttpSession` |
+`core/.../AppServices` is the composition root, the one place where objects are
+created with `new` and handed their dependencies through constructors. Starting
+it:
 
-Stateful vs. stateless in EJB 2.x:
+1. writes default settings to the config hash, without overwriting existing ones
+2. moves any unacknowledged price changes back onto the queue, then starts the worker thread
+3. publishes the cart and converter through Redisson RemoteService
 
-| | Stateful cart | Stateless converter |
+`close()` does the reverse. In the web application, `AppContextListener`
+(registered in web.xml) starts it when the application starts and closes it when
+it stops.
+
+The Redis address comes from the `redis.address` system property, then the
+`REDIS_ADDRESS` environment variable, and defaults to `redis://localhost:6379`.
+
+### Redis data layout
+
+All keys start with `jee6-ejb-examples:`.
+
+| Key | Type | Contents |
 |---|---|---|
-| Home `create` | Any arguments (`create(String)`), one bean instance per client | Exactly one, no arguments. Returns a reference; instances come from a pool |
-| `ejbCreate` called | On every client `create()` | When the container adds an instance to the pool |
-| `remove()` | Ends the conversation, `ejbRemove()` runs | Only discards the reference |
-| `ejbActivate`/`ejbPassivate` | Called around passivation | Never called |
-| `isIdentical` of two `create()` results | `false` | `true` |
+| `config` | hash | Settings as strings, e.g. `commissionPercent` → `1.5` |
+| `products` | hash | Field: the SKU as JSON (`"MG-002"`). Value: the product as JSON, e.g. `{"name":"Coffee mug","price":9.50,"sku":"MG-002"}` |
+| `cart:{<id>}:customer` | string | The customer name. The cart exists while this key does. Expires after 30 minutes idle |
+| `cart:{<id>}:items` | list | Item names in the order added. Same expiry |
+| `pricing:queue` | list | Waiting price change messages (JSON) |
+| `pricing:processing` | list | Messages taken but not yet acknowledged |
+| `pricing:dead` | list | Messages that failed 5 times |
+| `remote:...` | various | Redisson RemoteService requests and responses |
 
-## CMP entity example
+For example, with the Docker setup running:
 
-| File | Role |
-|------|------|
-| `ProductLocalHome` | `create(sku, name, price)`, `findByPrimaryKey`, `findAll`, `findByMaxPrice`, and the home business method `getAveragePrice()` |
-| `ProductLocal` | Getters/setters plus the business method `applyDiscount(percent)`. The primary key `sku` has no setter |
-| `ProductBean` | **Abstract** class implementing `EntityBean`. cmp-fields are abstract get/set pairs that the container implements. `ejbCreate` returns `null`; `ejbHomeGetAveragePrice()` uses the abstract `ejbSelectAllPrices()` |
-| `ejb-jar.xml` | `<entity>` with `persistence-type` `Container`, `cmp-version` `2.x`, abstract schema `Product`, cmp-fields, `primkey-field`, and the EJB-QL for `findAll`, `findByMaxPrice` and `ejbSelectAllPrices`. Transaction attribute `Required` |
-| `glassfish-ejb-jar.xml` | GlassFish-only CMP setup: uses `jdbc/__default` (built-in Derby) and creates/drops the table at deploy/undeploy |
-| `ProductServlet` | Wraps each request in a `UserTransaction`. Lists products, filters by max price, creates, discounts (update on commit) and deletes (`remove()`); also loads sample data |
+```bash
+docker compose -f docker/compose.yaml exec redis redis-cli HGETALL jee6-ejb-examples:products
+docker compose -f docker/compose.yaml exec redis redis-cli HSET jee6-ejb-examples:config commissionPercent 2.0
+```
 
-The entity has a **local view only**, as is usual for CMP 2.x entities: remote
-clients should go through a session bean ("session facade"), not call entity
-beans directly.
+The second command changes the converter's commission at once, without a redeploy.
 
-CMP table mapping is vendor-specific. The included `glassfish-ejb-jar.xml` covers
-GlassFish 3.x. Other servers need their own descriptor; for example JBoss EAP 6
-needs `jbosscmp-jdbc.xml` and its CMP subsystem enabled, and WildFly and later
-servers have no CMP support at all.
+## The examples
 
-## Message-driven bean example
+### Shopping cart (was the stateful session bean)
 
 | File | Role |
-|------|------|
-| `PriceChangeBean` | Implements `javax.ejb.MessageDrivenBean` + `javax.jms.MessageListener`. `ejbCreate()` looks up the Product home; `onMessage()` reads a `MapMessage` (`sku`, `percent`) and calls `applyDiscount()` on the entity |
-| `ejb-jar.xml` | `<message-driven>`: `messaging-type` `javax.jms.MessageListener`, `destinationType` activation property `javax.jms.Queue`, `mapped-name` `jms/PriceChangeQueue`, an `ejb-local-ref` to `ProductEJB`, and `onMessage` with trans-attribute `Required` |
-| `PriceChangeServlet` | Sends the messages (JMS 1.1) through a `resource-ref` (`jms/ConnectionFactory`) and a `message-destination-ref` (`jms/PriceChangeQueue`) declared in `web.xml` |
+|---|---|
+| `ShoppingCartService` | `createCart(customer)` returns a cart id. Every other method takes that id |
+| `RedisShoppingCartService` | Keeps each cart in two keys (see above). Every call pushes the expiry back |
+| `ShoppingCartServlet` | Keeps only the cart id in the `HttpSession`. Checkout calls `removeCart`. An expired cart is dropped from the session with a message |
 
-Things to notice:
-* **No home or component interface.** Clients can't call an MDB; they can only
-  send a message to its queue. The servlet returns immediately and the MDB does
-  the work a moment later. Open `/products` to see the new price.
-* **One transaction per message.** With `Required`, the JMS receive and the CMP
-  update commit together. If `onMessage` calls `setRollbackOnly()` (on a
-  `FinderException` or `JMSException`), the message goes back on the queue and
-  is redelivered.
-* **Poison messages.** Messages that can never succeed (unknown SKU, invalid
-  percent, wrong message type) are logged and committed, not rolled back.
-  Otherwise they would be redelivered over and over.
+Stateful vs. stateless, before and after:
 
-## Unit tests
+| | Before (stateful bean) | Now |
+|---|---|---|
+| Where the state lives | In the bean instance, on one server | In Redis, visible to every server and to remote clients |
+| Identity | The `EJBObject` / `Handle` | The cart id string |
+| Timeout | Container's stateful timeout, then `NoSuchObjectLocalException` | Redis key expiry (30 min idle), then `CartNotFoundException` |
+| Passivation | Serialized to disk by the container | Not needed |
+| Server restart | Carts lost | Carts kept (the Docker Redis uses an append-only file) |
 
-`./gradlew test` runs the unit tests in `ejb/src/test`, `web/src/test` and
-`client/src/test` (JUnit 5 + Mockito). They test the bean, servlet and client
-classes directly as plain objects, with the test acting as the container. No
-server or database is needed.
+### Currency converter (was the stateless session bean)
 
-### Bean tests (`ejb/src/test`)
+`CurrencyConverterService` has no per-client state and no mutable fields, so one
+instance is shared by every thread and no pool is needed. The commission comes
+from a `Supplier<BigDecimal>`. In the application that is
+`AppConfig::getCommissionPercent`, which reads Redis on every call.
 
-| Test | Covers |
-|------|--------|
-| `ShoppingCartBeanTest` | `ejbCreate` validation; state building up across calls; `ItemNotFoundException` vs. `EJBException`; read-only `getItems()`; state surviving passivation (serialize/deserialize between `ejbPassivate` and `ejbActivate`); `ejbRemove` |
-| `CurrencyConverterBeanTest` | Reading the `commissionPercent` env-entry from JNDI, and failing when it's missing; conversion math and rounding; case-insensitive codes; `UnsupportedCurrencyException`; pooled instances being interchangeable |
-| `ProductBeanTest` | Uses `InMemoryProductBean`, a subclass that does what the container's generated class would: it implements the abstract cmp-fields and returns a canned `ejbSelectAllPrices()`. Covers `ejbCreate` normalization, validation and the `null` key; `applyDiscount` rounding and bounds; the `ejbHomeGetAveragePrice` home method; `ejbRemove` using the mocked `EntityContext` |
-| `PriceChangeBeanTest` | `onMessage` with a mocked `ProductLocalHome`/`MapMessage`. Valid messages update the entity; an unknown SKU, an invalid percent or a wrong message type are discarded without rollback; a `FinderException` or `JMSException` calls `setRollbackOnly()` so the message is redelivered; `ejbCreate` failing without the home |
+### Product catalog (was the CMP entity bean)
 
-### Servlet tests (`web/src/test`)
+| File | Role |
+|---|---|
+| `Product` | Immutable value: `Product.of(sku, name, price)` validates and normalizes (SKU upper case, price to 2 decimals). `withDiscount(percent)` returns a new product |
+| `ProductCatalog` | `create`, `find`, `findAll` (by SKU), `findByMaxPrice` (cheapest first), `applyDiscount`, `delete`, `getAveragePrice` |
+| `RedisProductCatalog` | One Redis hash. `create` uses `HSETNX`, so concurrent duplicates fail cleanly. `applyDiscount` is an optimistic compare-and-set loop, so concurrent discounts all apply |
+| `ProductServlet` | The same page as before, without the `UserTransaction`. It still builds the page in memory, so a failure gives an error rather than half a page |
 
-The servlets are called directly (`doGet`/`doPost`). `HttpFixture` supplies a
-mocked request and response, with parameters and session attributes backed by
-maps, and captures the response HTML. Bean homes, the `UserTransaction` and the
-JMS objects are mocks bound in `InMemoryJndi` under the servlets' `java:comp/...` names.
+The queries read the whole hash. That suits a demo catalog. A large one would
+need an index (for example a sorted set of prices) or a search module.
 
-| Test | Covers |
-|------|--------|
-| `ShoppingCartServletTest` | `create()` once per login, with the bean kept in the session and reused by later requests; the old bean is removed on a new login; `remove()` and session cleanup at checkout; an expired bean (`NoSuchObjectLocalException`); application exception messages; HTML escaping |
-| `CurrencyConverterServletTest` | `init()` failing without the home; `create()` per request and no session use; the conversion result; missing or invalid amounts rejected before calling the bean; `UnsupportedCurrencyException`; HTML escaping |
-| `ProductServletTest` | Each request inside one `UserTransaction` (`begin`, then finder and getters, then `commit`, in that order); `findAll`/`findByMaxPrice`; create/duplicate/validation; discount range checked before the entity is touched; delete; sample data creating only missing products; rollback and **no page sent** on a failure or a failed commit; rollback-only status; HTML escaping |
-| `PriceChangeServletTest` | The `MapMessage` sent (trimmed, upper-case SKU and integer percent) through a non-transacted session; nothing sent for invalid input; the connection closed even when `send` fails; HTML escaping |
+### Asynchronous price changes (was the message-driven bean)
 
-### Remote client tests (`client/src/test`)
+| File | Role |
+|---|---|
+| `PriceChangeServlet` | Sends `(sku, percent)` with `PriceChangeQueue.send` and returns at once with the message id |
+| `PriceChange` | The message, as JSON: `id`, `sku`, `percent`, `attempt` |
+| `RedisPriceChangeQueue` | The "reliable queue" pattern on Redis lists: `BRPOPLPUSH` moves a message from `queue` to `processing` in one atomic step, and it stays there until acknowledged |
+| `PriceChangeWorker` | A daemon thread: receive, handle, then acknowledge, retry or dead-letter. At startup it puts back whatever a previous run left in `processing` |
+| `PriceChangeHandler` | The old `onMessage` rules: apply the discount; **discard** messages that can never succeed (unknown SKU, percent outside 1–99, unreadable JSON); **retry** when the catalog fails (e.g. Redis unavailable) |
 
-Each test runs the client's `main()` with the remote home and component
-interfaces mocked (standing in for RMI-IIOP stubs) and bound in `InMemoryJndi`
-under the client's lookup name. `ConsoleCapture` records what the client prints.
+Delivery is **at least once**. A crash after applying a discount but before
+acknowledging it applies the discount again on restart. The JMS version avoided
+that by committing the receive and the update in one transaction; Redis has no
+such transaction across the queue and the update. The design also assumes **one
+consumer** per queue (one application instance). For several, give each
+consumer its own processing list, or switch to Redis Streams with consumer groups.
 
-| Test | Covers |
-|------|--------|
-| `ShoppingCartRemoteClientTest` | The exact console output of the whole stateful conversation; all calls going to the same bean, in order; the customer-name argument; overriding `-Dcart.jndi` (JBoss name); the home and the `Handle`'s `EJBObject` both going through `PortableRemoteObject.narrow()`, with the wrong type rejected; lookup and `CreateException` failures; a wrapped `RemoteException` after `remove()` |
-| `CurrencyConverterRemoteClientTest` | The exact output of the sample conversions; a single conversion from three arguments (other argument counts use the samples); an invalid amount; two `create()` references with only the first removed; overriding `-Dconverter.jndi`; narrow, wrong type and lookup failures |
+## Remote clients
 
-`javax.rmi.PortableRemoteObject` was removed from the JDK after Java 8. The client
-tests get the API from `org.glassfish.corba:glassfish-corba-omgapi` (test-only)
-and plug in `testsupport/LocalPortableRemoteObject`, an in-JVM delegate. Its
-`narrow()` is a checked cast that also records each call, so the tests can check
-that the clients narrow instead of casting.
+The `client` module contains Java SE programs that call the web application's
+services through **Redisson RemoteService**. A call on the proxy becomes a
+request in Redis; one of the web application's RemoteService workers runs it
+and sends back the result or the exception. Checked exceptions such as
+`ItemNotFoundException` reach the client as themselves, as they did with EJB
+remote views. The clients need only the Redis address: no JNDI settings, vendor
+client jar or Java 8.
 
-### How it works
+`ShoppingCartRemoteClient` creates a cart, adds and removes items, gets an
+`ItemNotFoundException`, shows the cart id (the old `Handle`), removes the cart,
+and gets a `CartNotFoundException` afterwards. `CurrencyConverterRemoteClient`
+lists the currencies and commission, runs sample conversions, and gets an
+`UnsupportedCurrencyException`.
 
-* **API jars:** `javax:javaee-api:6.0` has no method bodies and can't be loaded
-  at runtime, so the test classpath uses the JBoss spec jars for EJB 3.1, JMS 1.1
-  and JTA 1.1 (plus Servlet 3.0 for `web`) instead. They are test-only and never
-packaged. The shared setup lives in `gradle/unit-tests.gradle`, which both modules
-apply. It also keeps `javaee-api` off the test classpath, since the war plugin
-would otherwise add it through `providedCompile`.
-* **JNDI:** the beans use `new InitialContext().lookup("java:comp/env/...")`.
-  `InMemoryJndi` (in `ejb/src/testFixtures`, shared with `web` through Gradle's
-  `java-test-fixtures` plugin) is a small `InitialContextFactory` that tests
-  install, so env-entries and mocked homes can be bound under those names.
-* **Java level:** test code is compiled for Java 11, because Mockito 5 needs it
-  and tests only run on the build JDK. The beans themselves stay at Java 8.
-* **Not covered:** the EJB-QL queries, the CMP table mapping, transactions, JMS
-  delivery and real RMI-IIOP calls are the container's and ORB's job. They can only be tested by deploying
-  the EAR to a real server (an in-container test tool such as Arquillian could
-  automate that).
+```bash
+./gradlew runClient                                  # cart client, customer "Alice"
+./gradlew runClient -PcustomerName=Bob
+./gradlew runConverterClient -Pconvert="250 GBP JPY"
+./gradlew runClient -PredisAddress=redis://otherhost:6379
+```
+
+A client fails with a `RemoteServiceAckTimeoutException` after 2 seconds if no
+web application is serving that Redis.
+
+## Run (Docker)
+
+```bash
+./gradlew appUp        # build the WAR, start Redis + Tomcat, deploy, wait for it
+./gradlew appDeploy    # rebuild and redeploy the WAR into the running Tomcat
+./gradlew appClients   # run both remote clients (on the host, against localhost:6379)
+./gradlew appLogs      # follow the Tomcat log (the services log there)
+./gradlew appDown      # stop and remove the containers and the Redis data
+```
+
+Then open http://localhost:8080/jee6-ejb-examples/ (cart at `/cart`, converter at
+`/converter`, products at `/products`, price changes at `/pricing`).
+
+| File | Role |
+|---|---|
+| `docker/compose.yaml` | `redis` (7.4, append-only file in a volume, port 6379 on 127.0.0.1 only) and `tomcat` (9.0, JDK 21, port 8080, `REDIS_ADDRESS=redis://redis:6379`) |
+| `docker/app.sh` | Called by the Gradle tasks. `deploy` streams the WAR into `webapps/` with a final rename, and waits for Tomcat's "deployment ... has finished" log line and an HTTP 200 |
+
+To deploy elsewhere, put the WAR on any Servlet 4.0 container (Tomcat 9, Jetty
+9.4/10) and set `REDIS_ADDRESS` or `-Dredis.address`. Tomcat 10 and later use
+`jakarta.servlet` and would need the servlets' imports changed.
+
+Notes:
+* Redisson's own logging goes through SLF4J (`slf4j-simple`, configured in
+  `web/src/main/resources/simplelogger.properties`). The ERROR entries that
+  RedissonRemoteService writes for every exception a service throws are turned
+  off there, because the caller receives and handles those exceptions.
+* On redeploy Tomcat may report that the application "created a ThreadLocal
+  ... InternalThreadLocalMap" (Netty, used by Redisson). Tomcat renews its
+  threads to clear it. To avoid the message, install Redisson in Tomcat's
+  `lib/` instead of the WAR.
+
+## Tests
+
+`./gradlew test` runs JUnit 5 + Mockito tests in all three modules.
+
+* **Plain unit tests** (no Redis): `Product`, `CurrencyConverterService`,
+  `PriceChange` JSON, `PriceChangeHandler` outcomes, `PriceChangeWorker`
+  (acknowledge / retry / dead-letter, start and stop) with a mocked queue, every
+  servlet with mocked services, `AppContextListener`, and the clients' exact
+  console output with mocked services.
+* **Redis tests**: each Redis class against a real Redis 7.4 that
+  Testcontainers starts in Docker (`core/src/testFixtures/.../RedisTestServer`,
+  one container per test JVM). They cover cart expiry, concurrent discounts, the
+  JSON stored, queue order, recovery and dead letters, the worker applying a
+  queued discount end to end (`AppServicesTest`, `WebIntegrationTest`), and
+  remote calls with exceptions over RemoteService (`RemoteClientsIntegrationTest`).
+  **Without Docker these tests are skipped, not failed.** Coverage then drops,
+  so run `check` with `-PminLineCoverage=0`.
 
 ## Code coverage
-
-Coverage is measured with JaCoCo while the unit tests run. It covers production
-code only, not the tests or test helpers.
 
 ```bash
 ./gradlew coverage   # combined report: build/reports/jacoco/testCodeCoverageReport/html/index.html
@@ -182,140 +236,6 @@ code only, not the tests or test helpers.
 ./gradlew check      # also fails if any module's line coverage is below the minimum
 ```
 
-* **Reports:** HTML for reading, plus XML (`*.xml` next to each `html/`
-  folder) for CI tools and IDEs. The combined report uses Gradle's
-  `jacoco-report-aggregation` plugin in the root `build.gradle`; the per-module
-  setup is in `gradle/unit-tests.gradle`.
-* **Minimum:** `check` (and so `build`) runs `jacocoTestCoverageVerification` in
-  each module and fails below 85% line coverage. Change the default with
-  `defaultMinLineCoverage` in the root `build.gradle`, or for one run with
-  `-PminLineCoverage=0.9`.
-
-## Deploy
-
-Deploy `ear/build/libs/jee6-ejb-examples.ear` to a **Java EE 6 Full Profile**
-server, then open `http://localhost:8080/jee6-ejb-examples/` (cart at `/cart`,
-converter at `/converter`, products at `/products`, MDB price changes at `/pricing`).
-
-GlassFish 3.x example:
-
-```bash
-asadmin start-domain
-asadmin start-database          # Derby, for the CMP entity's jdbc/__default
-
-# JMS resources for the MDB and PriceChangeServlet (create once, before deploying)
-asadmin create-jms-resource --restype javax.jms.ConnectionFactory jms/ConnectionFactory
-asadmin create-jms-resource --restype javax.jms.Queue \
-        --property Name=PriceChangeQueue jms/PriceChangeQueue
-
-asadmin deploy ear/build/libs/jee6-ejb-examples.ear
-```
-
-Notes:
-* The deployment fails if the JMS resources `jms/ConnectionFactory` and
-  `jms/PriceChangeQueue` don't exist on the server.
-* On JBoss EAP 6, `mapped-name` doesn't bind the MDB to the queue. Add a
-  `destination` activation-config property with the queue's JNDI name instead,
-  and map the servlet's JMS references in a `jboss-web.xml`.
-* EJB 2.x home/component views, entity beans and message-driven beans are not part of EJB 3.1 *Lite*,
-  so a Web Profile server won't run this. Use a Full Profile server.
-* The classes are compiled with `--release 8` (the oldest target current JDKs
-  support), so the server must run on Java 8 or later. Examples: GlassFish 3.1.2.2,
-  JBoss EAP 6.x, WebLogic 12c.
-* `javax:javaee-api:6.0` is compile-only, so it is not packaged anywhere.
-
-## Running on JBoss EAP 6.4 in Docker
-
-`docker/` builds a JBoss EAP 6.4 image (Java 8, `standalone-full` profile)
-configured for this application. Gradle tasks drive it:
-
-```bash
-./gradlew eapUp        # build the EAR and the image, start EAP, deploy, wait for the result
-./gradlew eapDeploy    # rebuild and redeploy the EAR into the running server
-./gradlew eapClients   # run both remote EJB clients (in a container; no local JDK 8 needed)
-./gradlew eapLogs      # follow the server log
-./gradlew eapDown      # stop and remove the container
-```
-
-**Before the first `eapUp`:** EAP can't be redistributed, so download
-*Red Hat JBoss Enterprise Application Platform 6.4.0* (`jboss-eap-6.4.0.zip`) from
-[developers.redhat.com](https://developers.redhat.com) (free account) and put it
-in `docker/`. For any other EAP 6.4.x zip, pass its name with
-`-PeapZip=<file name>`. `docker/*.zip` is gitignored.
-
-Then open http://localhost:8080/jee6-ejb-examples/. The management console is at
-http://localhost:9990 (`admin` / `Admin#2026`).
-
-**Why EAP 6.4:** it's the last JBoss EAP release that supports CMP entity beans.
-EAP 7 removed entity beans entirely and rejects the EAR. EAP 6 is long past
-mainstream support, so use this for development and learning only.
-
-| File | Role |
-|------|------|
-| `docker/Dockerfile` | `eclipse-temurin:8-jdk` + the EAP zip. Creates a management user and an application user (for remote EJB), then runs `configure-eap.cli` against a briefly started server. The healthcheck passes once the app answers |
-| `docker/configure-eap.cli` | Adds the HornetQ queue `java:/jms/queue/PriceChangeQueue`. Everything else the app needs (the `cmp` subsystem, `ExampleDS` H2 datasource, `java:/JmsXA`, the remote EJB connector on 4447) is already in `standalone-full.xml` |
-| `docker/compose.yaml` | The `eap` service (ports 8080, 9990, 4447) and an on-demand `client` service that runs the remote clients with the image's Java 8 and `jboss-client.jar` |
-| `docker/eap.sh` | Called by the Gradle tasks. `deploy` streams the EAR into the deployment scanner's folder and waits for EAP's `.deployed` or `.failed` marker |
-| `docker/client/jboss-ejb-client.properties` | Remote EJB connection settings for the clients (host `eap`, port 4447, the application user) |
-
-JBoss-specific descriptors in the app (other servers ignore them):
-
-| File | Purpose |
-|------|---------|
-| `ejb/.../META-INF/jbosscmp-jdbc.xml` | Maps `ProductEJB` to a `PRODUCT` table in `java:jboss/datasources/ExampleDS` (in-memory H2), created at deploy time. Data is lost when the server restarts |
-| `ejb/.../META-INF/jboss-ejb3.xml` | Sets the MDB's `destination` activation property; JBoss ignores `mapped-name` for MDBs |
-| `web/.../WEB-INF/jboss-web.xml` | Binds the servlet's `jms/ConnectionFactory` to `java:/JmsXA` and `jms/PriceChangeQueue` to the HornetQ queue |
-
-The passwords (`Admin#2026`, `EjbUser#2026`) are development defaults. Change
-them with `--build-arg` (`ADMIN_PASSWORD`, `EJB_PASSWORD`) and in
-`docker/client/jboss-ejb-client.properties`.
-
-## Remote clients
-
-The `client` module contains standalone Java SE programs that use the session
-beans' **remote** EJB 2.x views.
-
-`ShoppingCartRemoteClient` (stateful):
-
-1. JNDI lookup of `ShoppingCartHome`, then `PortableRemoteObject.narrow()`
-2. `home.create(customer)` creates a new stateful instance
-3. Several business calls against the same instance, so cart state accumulates
-4. An application exception (`ItemNotFoundException`) reaching the client
-5. `getHandle()` / `handle.getEJBObject()`: a serializable reference to the same conversation
-6. `remove()`, then a call on the removed bean, which fails with `NoSuchObjectException`
-
-`CurrencyConverterRemoteClient` (stateless) does the same for the converter: a
-no-arg `create()`, several conversions, an `UnsupportedCurrencyException`,
-`isIdentical()` returning `true` for two references, and `remove()`, which leaves
-the pool untouched.
-
-```bash
-# Run against a server where the EAR is deployed (GlassFish 3 example):
-./gradlew runClient \
-    -PserverClientJar=/opt/glassfish3/glassfish/lib/gf-client.jar \
-    -PclientJavaHome=/usr/lib/jvm/java-8-openjdk-amd64
-
-# Stateless converter client, same settings:
-./gradlew runConverterClient -PserverClientJar=... -PclientJavaHome=... -Pconvert="250 GBP JPY"
-```
-
-| Property | Purpose |
-|----------|---------|
-| `serverClientJar` | **Required.** The server's client library (`gf-client.jar`, `jboss-client.jar`, `wlthint3client.jar`, ...). Separate several paths with `:` |
-| `clientJavaHome` | A JDK 8 to run the client with. RMI-IIOP was removed from the JDK after Java 8, and Java EE 6 era client libraries need it |
-| `cartJndi` | `runClient`: home JNDI name. Defaults to `java:global/jee6-ejb-examples/jee6-ejb-examples-ejb/ShoppingCartEJB!com.example.ejb.cart.ShoppingCartHome` |
-| `customerName` | `runClient`: customer name passed to `create()` (default `Alice`) |
-| `converterJndi` | `runConverterClient`: home JNDI name. Defaults to `java:global/jee6-ejb-examples/jee6-ejb-examples-ejb/CurrencyConverterEJB!com.example.ejb.converter.CurrencyConverterHome` |
-| `convert` | `runConverterClient`: one conversion, e.g. `-Pconvert="250 GBP JPY"` (default: three sample conversions) |
-
-The portable names follow `java:global/<application-name>/<module-name>/<ejb-name>!<interface>`.
-The application name is set in the EAR's `application.xml` and the module name
-in `ejb-jar.xml`.
-
-JNDI connection settings live in `client/src/main/resources/jndi.properties`,
-which has commented blocks for GlassFish and JBoss AS 7 / EAP 6. On JBoss use:
-
-```
--PcartJndi='ejb:jee6-ejb-examples/jee6-ejb-examples-ejb//ShoppingCartEJB!com.example.ejb.cart.ShoppingCartHome?stateful'
--PconverterJndi='ejb:jee6-ejb-examples/jee6-ejb-examples-ejb//CurrencyConverterEJB!com.example.ejb.converter.CurrencyConverterHome'
-```
+`check` (and so `build`) fails below 85% line coverage in any module. Change the
+default with `defaultMinLineCoverage` in the root `build.gradle`, or for one run
+with `-PminLineCoverage=0.9`.

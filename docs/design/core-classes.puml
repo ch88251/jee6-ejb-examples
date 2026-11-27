@@ -1,0 +1,21 @@
+@startuml
+
+package "core" {
+    interface cart.ShoppingCartService {
+
+    }
+
+    class cart.RedisShoppingCartService {
+
+    }
+
+    cart.RedisShoppingCartService -up-|> cart.ShoppingCartService
+}
+
+package "redisson" {
+    interface RedissonClient
+}
+
+RedisShoppingCartService *-right-> RedissonClient
+
+@enduml

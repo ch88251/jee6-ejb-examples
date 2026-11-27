@@ -1,61 +1,53 @@
 package com.example.web;
 
-import com.example.ejb.converter.CurrencyConverterLocal;
-import com.example.ejb.converter.CurrencyConverterLocalHome;
-import com.example.ejb.converter.UnsupportedCurrencyException;
+import static com.example.web.Html.escape;
+
+import com.example.core.converter.CurrencyConverter;
+import com.example.core.converter.UnsupportedCurrencyException;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.math.BigDecimal;
 import java.util.List;
-import javax.ejb.CreateException;
-import javax.naming.InitialContext;
-import javax.naming.NamingException;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 /**
- * Web client for the EJB 2.x stateless converter.
+ * Web client for the currency converter.
  * <p>
- * Compare with {@link ShoppingCartServlet}: nothing is stored in the HTTP
- * session. The home is looked up once and cached, which is safe because homes
- * are thread-safe. Each request calls {@code create()}, which is cheap for a
- * stateless bean because it only returns a reference; pooled instances do
- * the work.
+ * Nothing is stored in the HTTP session. The converter is stateless and
+ * thread-safe, so the servlet fetches the one shared instance once, in
+ * {@code init()}, and uses it for every request.
  */
 public class CurrencyConverterServlet extends HttpServlet {
 
     private static final long serialVersionUID = 1L;
-    private static final String HOME_JNDI = "java:comp/env/ejb/CurrencyConverter";
 
-    private transient CurrencyConverterLocalHome home;
+    private transient CurrencyConverter converter;
 
     @Override
     public void init() throws ServletException {
         try {
-            home = (CurrencyConverterLocalHome) new InitialContext().lookup(HOME_JNDI);
-        } catch (NamingException e) {
-            throw new ServletException("Cannot look up " + HOME_JNDI, e);
+            converter = AppContextListener.service(getServletContext(), CurrencyConverter.class);
+        } catch (IllegalStateException e) {
+            throw new ServletException(e.getMessage(), e);
         }
     }
 
     @Override
-    protected void doGet(HttpServletRequest req, HttpServletResponse resp)
-            throws ServletException, IOException {
-        render(req, resp, newConverter(), "100", "USD", "EUR", null);
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        render(req, resp, "100", "USD", "EUR", null);
     }
 
     @Override
-    protected void doPost(HttpServletRequest req, HttpServletResponse resp)
-            throws ServletException, IOException {
+    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
         String amount = req.getParameter("amount");
         String from = req.getParameter("from");
         String to = req.getParameter("to");
-        CurrencyConverterLocal converter = newConverter();
         String message;
         if (amount == null || amount.trim().isEmpty()) {
-            render(req, resp, converter, "", from, to, "Please enter an amount.");
+            render(req, resp, "", from, to, "Please enter an amount.");
             return;
         }
         try {
@@ -63,29 +55,23 @@ public class CurrencyConverterServlet extends HttpServlet {
             message = amount.trim() + " " + from + " = " + result.toPlainString() + " " + to;
         } catch (NumberFormatException e) {
             message = "Not a valid amount: " + amount;
-        } catch (UnsupportedCurrencyException e) {
+        } catch (IllegalArgumentException | UnsupportedCurrencyException e) {
             message = e.getMessage();
         }
-        render(req, resp, converter, amount, from, to, message);
+        render(req, resp, amount, from, to, message);
     }
 
-    private CurrencyConverterLocal newConverter() throws ServletException {
-        try {
-            return home.create();
-        } catch (CreateException e) {
-            throw new ServletException(e);
-        }
-    }
-
-    private void render(HttpServletRequest req, HttpServletResponse resp, CurrencyConverterLocal converter,
+    private void render(HttpServletRequest req, HttpServletResponse resp,
                         String amount, String from, String to, String message) throws IOException {
         List<String> currencies = converter.getSupportedCurrencies();
 
         resp.setContentType("text/html;charset=UTF-8");
         PrintWriter out = resp.getWriter();
-        out.println("<!DOCTYPE html><html><head><title>EJB 2.x Stateless Converter</title></head><body>");
-        out.println("<h1>EJB 2.x Stateless Session Bean Demo</h1>");
-        out.println("<p>Commission: " + converter.getCommissionPercent() + "% (set by an env-entry in ejb-jar.xml)</p>");
+        out.println("<!DOCTYPE html><html><head><title>Currency Converter</title></head><body>");
+        out.println("<h1>Currency Converter (stateless service)</h1>");
+        out.println("<p>Commission: " + converter.getCommissionPercent()
+                + "% (the <code>commissionPercent</code> field of the Redis hash "
+                + "<code>jee6-ejb-examples:config</code>)</p>");
         if (message != null) {
             out.println("<p><strong>" + escape(message) + "</strong></p>");
         }
@@ -104,13 +90,5 @@ public class CurrencyConverterServlet extends HttpServlet {
               .append('>').append(option).append("</option>");
         }
         return sb.append("</select>").toString();
-    }
-
-    private static String escape(String s) {
-        if (s == null) {
-            return "";
-        }
-        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                .replace("'", "&#39;").replace("\"", "&quot;");
     }
 }

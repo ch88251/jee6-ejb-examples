@@ -1,13 +1,15 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>Java EE 6 EJB 2.x Examples</title></head>
+<head><meta charset="UTF-8"><title>POJO + Redis Examples</title></head>
 <body>
-<h1>Java EE 6 EJB 2.x Examples</h1>
+<h1>POJO + Redis Examples</h1>
+<p>Plain Java services, wired by a <code>ServletContextListener</code>, with their state in Redis (Redisson).
+These were EJB 2.x beans.</p>
 <ul>
-    <li><a href="cart">Stateful session bean: shopping cart</a></li>
-    <li><a href="converter">Stateless session bean: currency converter</a></li>
-    <li><a href="products">CMP entity bean: product catalog</a></li>
-    <li><a href="pricing">Message-driven bean: asynchronous price changes</a></li>
+    <li><a href="cart">Shopping cart: per-customer state in Redis (was a stateful session bean)</a></li>
+    <li><a href="converter">Currency converter: one shared stateless service (was a stateless session bean)</a></li>
+    <li><a href="products">Product catalog: a Redis hash (was a CMP entity bean)</a></li>
+    <li><a href="pricing">Asynchronous price changes: a Redis queue and a worker thread (was a message-driven bean)</a></li>
 </ul>
 </body>
 </html>

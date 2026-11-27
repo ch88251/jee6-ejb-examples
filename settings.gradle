@@ -1,6 +1,5 @@
 rootProject.name = 'jee6-ejb-examples'
 
-include 'ejb'     // EJB module: session + entity beans, META-INF/ejb-jar.xml
-include 'web'     // web module: servlets -> WAR
-include 'client'  // standalone remote clients
-include 'ear'     // enterprise archive bundling ejb + web
+include 'core'    // POJO services + their Redis (Redisson) implementations
+include 'web'     // servlets + the listener that wires the services -> WAR
+include 'client'  // standalone clients calling the services through Redisson RemoteService

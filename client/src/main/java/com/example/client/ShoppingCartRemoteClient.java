@@ -1,91 +1,70 @@
 package com.example.client;
 
-import com.example.ejb.cart.ItemNotFoundException;
-import com.example.ejb.cart.ShoppingCart;
-import com.example.ejb.cart.ShoppingCartHome;
-import java.rmi.NoSuchObjectException;
-import java.rmi.RemoteException;
-import javax.ejb.Handle;
-import javax.naming.InitialContext;
-import javax.naming.NamingException;
-import javax.rmi.PortableRemoteObject;
+import com.example.core.cart.CartNotFoundException;
+import com.example.core.cart.ItemNotFoundException;
+import com.example.core.cart.ShoppingCartService;
+import org.redisson.api.RedissonClient;
 
 /**
- * Standalone (out-of-container) client for the EJB 2.x stateful cart, using
- * its remote view ({@link ShoppingCartHome} / {@link ShoppingCart}).
+ * Standalone client for the shopping cart, calling the web application's
+ * {@link ShoppingCartService} through Redisson RemoteService.
  * <p>
- * The client runs in its own JVM. It needs the server vendor's client library
- * on the classpath, and JNDI settings for that server, which it reads from
- * {@code jndi.properties} or {@code -Djava.naming.*} system properties.
+ * It needs only the Redis address ({@code -Dredis.address=...} or
+ * {@code REDIS_ADDRESS}, default {@code redis://localhost:6379}) and the web
+ * application running against the same Redis. There is no JNDI setup, server
+ * client library or Java 8 requirement.
  * <p>
- * The home's JNDI name depends on the server. Set it with {@code -Dcart.jndi=...};
- * the default is the Java EE 6 portable global name.
+ * Argument (optional): the customer name, default {@code Alice}.
  */
-public class ShoppingCartRemoteClient {
+public final class ShoppingCartRemoteClient {
 
-    static final String DEFAULT_JNDI_NAME =
-            "java:global/jee6-ejb-examples/jee6-ejb-examples-ejb/ShoppingCartEJB!com.example.ejb.cart.ShoppingCartHome";
+    private ShoppingCartRemoteClient() {
+    }
 
     public static void main(String[] args) throws Exception {
-        String jndiName = System.getProperty("cart.jndi", DEFAULT_JNDI_NAME);
         String customer = args.length > 0 ? args[0] : "Alice";
-
-        ShoppingCartHome home = lookupHome(jndiName);
-
-        // create<METHOD> on the home -> ejbCreate<METHOD> on a new bean instance.
-        ShoppingCart cart = home.create(customer);
-        System.out.println("Created cart for " + cart.getCustomerName());
-
-        // Each call goes to the SAME bean instance, so state builds up between calls.
-        cart.addItem("Java EE 6 Tutorial");
-        cart.addItem("Coffee mug");
-        cart.addItem("Keyboard");
-        System.out.println("Items after adding: " + cart.getItems());
-
-        cart.removeItem("Coffee mug");
-        System.out.println("Items after removing: " + cart.getItems());
-
-        // An application exception reaches the client as itself, not wrapped.
+        RedissonClient redisson = RemoteServices.connect();
         try {
-            cart.removeItem("Unicorn");
+            run(RemoteServices.proxy(redisson, ShoppingCartService.class), customer);
+        } finally {
+            redisson.shutdown();
+        }
+    }
+
+    static void run(ShoppingCartService carts, String customer) throws Exception {
+        // createCart replaces home.create(customer). It returns an id rather
+        // than a stub; the cart's state lives in Redis.
+        String cartId = carts.createCart(customer);
+        System.out.println("Created cart for " + carts.getCustomerName(cartId));
+
+        // Every call names the same cart, so state builds up between calls.
+        carts.addItem(cartId, "Java EE 6 Tutorial");
+        carts.addItem(cartId, "Coffee mug");
+        carts.addItem(cartId, "Keyboard");
+        System.out.println("Items after adding: " + carts.getItems(cartId));
+
+        carts.removeItem(cartId, "Coffee mug");
+        System.out.println("Items after removing: " + carts.getItems(cartId));
+
+        // A checked exception thrown by the service reaches the client as itself.
+        try {
+            carts.removeItem(cartId, "Unicorn");
         } catch (ItemNotFoundException e) {
             System.out.println("Expected application exception: " + e.getMessage());
         }
 
-        // A Handle is a serializable reference to this bean instance. It could be
-        // saved and used later, or in another JVM, to reach the same conversation.
-        Handle handle = cart.getHandle();
-        ShoppingCart sameCart = (ShoppingCart) PortableRemoteObject.narrow(
-                handle.getEJBObject(), ShoppingCart.class);
-        System.out.println("Re-obtained from handle, identical = " + cart.isIdentical(sameCart)
-                + ", item count = " + sameCart.getItemCount());
+        // The id is what an EJB Handle used to be: a serializable reference to
+        // the conversation. Any client, or a later run, can continue with it.
+        System.out.println("Cart id " + cartId + " holds " + carts.getItemCount(cartId) + " item(s)");
 
-        // remove() ends the conversation; the container calls ejbRemove().
-        cart.remove();
+        // removeCart ends the conversation and deletes the state.
+        carts.removeCart(cartId);
         System.out.println("Cart removed.");
 
         try {
-            cart.getItemCount();
-        } catch (NoSuchObjectException e) {
-            System.out.println("Expected after remove(): " + e.getClass().getSimpleName());
-        } catch (RemoteException e) {
-            // Some servers wrap the exception in another RemoteException.
-            System.out.println("Expected after remove(): " + e);
-        }
-    }
-
-    /**
-     * Looks up the remote home the EJB 2.x way. The object from JNDI may be an
-     * RMI-IIOP stub, so it must be narrowed, not just cast.
-     */
-    static ShoppingCartHome lookupHome(String jndiName) throws NamingException {
-        InitialContext ctx = new InitialContext();
-        try {
-            System.out.println("Looking up " + jndiName);
-            Object ref = ctx.lookup(jndiName);
-            return (ShoppingCartHome) PortableRemoteObject.narrow(ref, ShoppingCartHome.class);
-        } finally {
-            ctx.close();
+            carts.getItemCount(cartId);
+        } catch (CartNotFoundException e) {
+            System.out.println("Expected after removeCart(): " + e.getClass().getSimpleName());
         }
     }
 }

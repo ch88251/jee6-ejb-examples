@@ -5,31 +5,16 @@ plugins {
 apply from: rootProject.file('gradle/unit-tests.gradle')
 
 dependencies {
-    providedCompile rootProject.javaeeApi
-    // The bean interfaces come from the EJB module, which sits next to the WAR in
-    // the EAR, so they are compiled against but not copied into WEB-INF/lib.
-    providedCompile project(':ejb')
+    // Servlet 4.0 (javax.*), supplied by Tomcat 9 at runtime.
+    providedCompile 'javax.servlet:javax.servlet-api:4.0.1'
+    // The services and Redisson are packaged in WEB-INF/lib.
+    implementation project(':core')
+    runtimeOnly "org.slf4j:slf4j-simple:${rootProject.slf4jVersion}"   // Redisson logs through SLF4J
 
-    // Servlet 3.0 API with real classes for the tests (see gradle/unit-tests.gradle).
-    testImplementation 'org.jboss.spec.javax.servlet:jboss-servlet-api_3.0_spec:1.0.2.Final'
-    testImplementation testFixtures(project(':ejb'))   // InMemoryJndi
+    testImplementation testFixtures(project(':core'))   // RedisTestServer
 }
 
 war {
-    archiveFileName = 'jee6-ejb-examples-web.war'
-    manifest {
-        // Lets the web module load classes from the EJB jar in the same EAR.
-        attributes 'Class-Path': 'jee6-ejb-examples-ejb.jar'
-    }
-}
-
-// Exposes the WAR (not the plain classes jar) to the ear project.
-configurations {
-    warFile {
-        canBeConsumed = true
-        canBeResolved = false
-    }
-}
-artifacts {
-    warFile tasks.named('war')
+    // Tomcat deploys jee6-ejb-examples.war at /jee6-ejb-examples
+    archiveFileName = 'jee6-ejb-examples.war'
 }

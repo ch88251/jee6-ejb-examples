@@ -6,79 +6,55 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import com.example.ejb.converter.CurrencyConverterLocal;
-import com.example.ejb.converter.CurrencyConverterLocalHome;
-import com.example.ejb.converter.UnsupportedCurrencyException;
-import com.example.ejb.testsupport.InMemoryJndi;
+import com.example.core.converter.CurrencyConverter;
+import com.example.core.converter.UnsupportedCurrencyException;
 import java.math.BigDecimal;
 import java.util.Arrays;
-import javax.ejb.CreateException;
-import javax.servlet.ServletConfig;
 import javax.servlet.ServletException;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.NullAndEmptySource;
-import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
-/**
- * Unit tests for {@link CurrencyConverterServlet}: the home cached in init(),
- * a stateless reference created per request, and nothing stored in the session.
- */
+/** Unit tests for {@link CurrencyConverterServlet} with the converter mocked. */
 @ExtendWith(MockitoExtension.class)
-@MockitoSettings(strictness = Strictness.LENIENT) // render() stubs are shared by all tests
+@MockitoSettings(strictness = Strictness.LENIENT)
 class CurrencyConverterServletTest {
 
-    @Mock private CurrencyConverterLocalHome home;
-    @Mock private CurrencyConverterLocal converter;
-    @Mock private ServletConfig config;
+    @Mock private CurrencyConverter converter;
 
     private CurrencyConverterServlet servlet;
     private HttpFixture http;
 
     @BeforeEach
     void setUp() throws Exception {
-        InMemoryJndi.install();
-        InMemoryJndi.bind("java:comp/env/ejb/CurrencyConverter", home);
-        when(home.create()).thenReturn(converter);
+        servlet = ServletSetup.init(new CurrencyConverterServlet(), CurrencyConverter.class, converter);
+        http = new HttpFixture();
         when(converter.getSupportedCurrencies()).thenReturn(Arrays.asList("USD", "EUR", "GBP"));
         when(converter.getCommissionPercent()).thenReturn(new BigDecimal("1.5"));
-
-        servlet = new CurrencyConverterServlet();
-        servlet.init(config);
-        http = new HttpFixture();
-    }
-
-    @AfterEach
-    void cleanUp() {
-        InMemoryJndi.uninstall();
     }
 
     @Test
-    void initFailsWhenHomeIsNotBound() {
-        InMemoryJndi.install(); // nothing bound
-        assertThrows(ServletException.class, () -> new CurrencyConverterServlet().init(config));
+    void initFailsWithoutTheService() {
+        assertThrows(ServletException.class,
+                () -> ServletSetup.init(new CurrencyConverterServlet(), String.class, "unrelated"));
     }
 
     @Test
     void getRendersFormWithDefaults() throws Exception {
         servlet.doGet(http.request, http.response);
 
-        String html = http.html();
-        assertTrue(html.contains("Commission: 1.5%"));
-        assertTrue(html.contains("<option selected>USD</option>"), "from defaults to USD");
-        assertTrue(html.contains("name='amount' value='100'"));
-        verify(converter, never()).convert(any(), anyString(), anyString());
+        assertTrue(http.html().contains("Commission: 1.5%"));
+        assertTrue(http.html().contains("value='100'"));
+        assertTrue(http.html().contains("<option selected>USD</option>"));
+        assertTrue(http.html().contains("<option selected>EUR</option>"));
     }
 
     @Test
@@ -87,40 +63,42 @@ class CurrencyConverterServletTest {
 
         servlet.doPost(http.param("amount", " 100 ").param("from", "USD").param("to", "EUR").request, http.response);
 
-        assertTrue(http.html().contains("<strong>100 USD = 90.62 EUR</strong>"));
+        assertTrue(http.html().contains("100 USD = 90.62 EUR"));
     }
 
     @Test
-    void eachRequestCreatesAReferenceAndNothingGoesInTheSession() throws Exception {
-        servlet.doGet(http.request, http.response);
-        HttpFixture second = http.nextRequest();
-        servlet.doGet(second.request, second.response);
+    void nothingGoesInTheSession() throws Exception {
+        when(converter.convert(any(), anyString(), anyString())).thenReturn(BigDecimal.ONE);
 
-        verify(home, times(2)).create();
-        verify(http.request, never()).getSession();
-        verify(second.request, never()).getSession();
+        servlet.doPost(http.param("amount", "1").param("from", "USD").param("to", "EUR").request, http.response);
+
+        verifyNoInteractions(http.session);
     }
 
-    @ParameterizedTest
-    @NullAndEmptySource
-    @ValueSource(strings = {"   "})
-    void missingAmountIsRejectedBeforeCallingTheBean(String amount) throws Exception {
-        servlet.doPost(http.param("amount", amount).param("from", "USD").param("to", "EUR").request, http.response);
+    @Test
+    void missingOrInvalidAmountsAreRejectedBeforeCallingTheConverter() throws Exception {
+        servlet.doPost(http.param("amount", " ").request, http.response);
+        HttpFixture second = new HttpFixture().param("amount", "lots").param("from", "USD").param("to", "EUR");
+        servlet.doPost(second.request, second.response);
 
         assertTrue(http.html().contains("Please enter an amount."));
+        assertTrue(second.html().contains("Not a valid amount: lots"));
         verify(converter, never()).convert(any(), anyString(), anyString());
     }
 
     @Test
-    void invalidAmountShowsMessage() throws Exception {
-        servlet.doPost(http.param("amount", "abc").param("from", "USD").param("to", "EUR").request, http.response);
+    void negativeAmountShowsTheServiceMessage() throws Exception {
+        when(converter.convert(new BigDecimal("-5"), "USD", "EUR"))
+                .thenThrow(new IllegalArgumentException("Amount must be zero or positive"));
 
-        assertTrue(http.html().contains("Not a valid amount: abc"));
+        servlet.doPost(http.param("amount", "-5").param("from", "USD").param("to", "EUR").request, http.response);
+
+        assertTrue(http.html().contains("Amount must be zero or positive"));
     }
 
     @Test
     void unsupportedCurrencyShowsApplicationException() throws Exception {
-        when(converter.convert(any(), anyString(), anyString())).thenThrow(new UnsupportedCurrencyException("XYZ"));
+        when(converter.convert(BigDecimal.ONE, "USD", "XYZ")).thenThrow(new UnsupportedCurrencyException("XYZ"));
 
         servlet.doPost(http.param("amount", "1").param("from", "USD").param("to", "XYZ").request, http.response);
 
@@ -128,18 +106,10 @@ class CurrencyConverterServletTest {
     }
 
     @Test
-    void createExceptionFailsTheRequest() throws Exception {
-        when(home.create()).thenThrow(new CreateException("pool exhausted"));
-
-        assertThrows(ServletException.class, () -> servlet.doGet(http.request, http.response));
-    }
-
-    @Test
     void echoedAmountIsHtmlEscaped() throws Exception {
-        servlet.doPost(http.param("amount", "'><script>").param("from", "USD").param("to", "EUR").request,
-                http.response);
+        servlet.doPost(http.param("amount", "<x>'").request, http.response);
 
-        assertFalse(http.html().contains("<script>"));
-        assertTrue(http.html().contains("&#39;&gt;&lt;script&gt;"));
+        assertTrue(http.html().contains("Not a valid amount: &lt;x&gt;&#39;"));
+        assertFalse(http.html().contains("<x>"));
     }
 }
